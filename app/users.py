@@ -1,7 +1,7 @@
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from .access import (
     binding_label,
@@ -13,6 +13,7 @@ from .access import (
     user_item,
     verify_password,
 )
+from .audit import actor_for_user, actor_from_session, create_session, insert_audit, record_audit, session_token
 from .database import get_connection
 from .records import utc_now
 from .schemas import (
@@ -144,7 +145,7 @@ def user_summary():
 
 
 @router.post("/human", response_model=UserCreated, status_code=201)
-def create_human(body: HumanCreate):
+def create_human(body: HumanCreate, request: Request):
     name = _required(body.name, "name")
     username = _required(body.username, "username")
     email = _email(body.email)
@@ -152,9 +153,11 @@ def create_human(body: HumanCreate):
     if len(password) < 8:
         raise HTTPException(status_code=422, detail="password must be at least 8 characters")
     now = utc_now()
-    with get_connection() as conn:
-        try:
-            cursor = conn.execute(
+    metadata = {"username": username, "email": email, "department": _optional(body.department)}
+    try:
+        with get_connection() as conn:
+            try:
+                cursor = conn.execute(
                 """
                 INSERT INTO users (
                     identity_type, name, username, email, password_hash, department, title,
@@ -173,58 +176,147 @@ def create_human(body: HumanCreate):
                     now,
                 ),
             )
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail="username or email already exists") from exc
-        user = get_user(conn, int(cursor.lastrowid))
-        return {
-            "id": user["id"],
-            "name": user["name"],
-            "verification": user["verification"],
-            "access_binding": "NO_BINDING",
-            "status": user["status"],
-        }
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(status_code=409, detail="username or email already exists") from exc
+            user = get_user(conn, int(cursor.lastrowid))
+            insert_audit(
+                conn,
+                category="USER_ACCESS",
+                event_type="USER_CREATED",
+                action="CREATE",
+                target={"id": user["id"], "name": user["name"], "type": "USER"},
+                description="Created new human identity.",
+                request=request,
+                metadata=metadata,
+            )
+            return {
+                "id": user["id"],
+                "name": user["name"],
+                "verification": user["verification"],
+                "access_binding": "NO_BINDING",
+                "status": user["status"],
+            }
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            record_audit(
+                category="USER_ACCESS",
+                event_type="USER_CREATED",
+                action="CREATE",
+                outcome="FAILED",
+                target={"name": name, "type": "USER"},
+                description="Failed to create human identity.",
+                request=request,
+                metadata={**metadata, "reason": exc.detail},
+            )
+        raise
 
 
 @router.post("/login", response_model=LoginOut)
-def login(body: LoginIn):
+def login(body: LoginIn, request: Request):
     account = body.account.strip()
     password = body.password.strip()
     if not account or not password:
         raise HTTPException(status_code=401, detail="invalid account or password")
-    with get_connection() as conn:
-        user = conn.execute(
-            """
-            SELECT * FROM users
-            WHERE deleted_at IS NULL AND username = ? COLLATE NOCASE
-            """,
-            (account,),
-        ).fetchone()
-        if user is None:
+    failure_actor = None
+    failure_event = "LOGIN_FAILED"
+    failure_outcome = "FAILED"
+    failure_description = "Login failed."
+    try:
+        with get_connection() as conn:
             user = conn.execute(
                 """
                 SELECT * FROM users
-                WHERE deleted_at IS NULL AND email = ?
+                WHERE deleted_at IS NULL AND username = ? COLLATE NOCASE
                 """,
-                (account.lower(),),
+                (account,),
             ).fetchone()
-        if user is None or not verify_password(password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="invalid account or password")
-        if user["identity_type"] != "HUMAN":
-            raise HTTPException(status_code=403, detail="account is not human")
-        if user["verification"] != "VERIFIED":
-            raise HTTPException(status_code=403, detail="account is not verified")
-        if user["status"] != "ACTIVE":
-            raise HTTPException(status_code=403, detail="account is not active")
-        return {
-            "id": user["id"],
-            "name": user["name"],
-            "username": user["username"],
-            "email": user["email"],
-            "department": user["department"],
-            "verification": user["verification"],
-            "status": user["status"],
-            "access": effective_access(conn, user["id"]),
-        }
+            if user is None:
+                user = conn.execute(
+                    """
+                    SELECT * FROM users
+                    WHERE deleted_at IS NULL AND email = ?
+                    """,
+                    (account.lower(),),
+                ).fetchone()
+            if user is None or not verify_password(password, user["password_hash"]):
+                if user is not None:
+                    failure_actor = actor_for_user(conn, user)
+                raise HTTPException(status_code=401, detail="invalid account or password")
+            failure_actor = actor_for_user(conn, user)
+            if user["identity_type"] != "HUMAN":
+                failure_event = "ACCESS_DENIED"
+                failure_outcome = "DENIED"
+                failure_description = "Account is not human."
+                raise HTTPException(status_code=403, detail="account is not human")
+            if user["verification"] != "VERIFIED":
+                failure_event = "ACCESS_DENIED"
+                failure_outcome = "DENIED"
+                failure_description = "Account is not verified."
+                raise HTTPException(status_code=403, detail="account is not verified")
+            if user["status"] != "ACTIVE":
+                failure_event = "ACCESS_DENIED"
+                failure_outcome = "DENIED"
+                failure_description = "Account is not active."
+                raise HTTPException(status_code=403, detail="account is not active")
+            session_id = create_session(conn, user["id"])
+            actor = actor_for_user(conn, user)
+            insert_audit(
+                conn,
+                actor=actor,
+                category="AUTHENTICATION",
+                event_type="USER_LOGIN",
+                action="LOGIN",
+                target={"id": user["id"], "name": user["name"], "type": "USER"},
+                description="Signed in.",
+                request=request,
+                session_id=session_id,
+            )
+            return {
+                "id": user["id"],
+                "name": user["name"],
+                "username": user["username"],
+                "email": user["email"],
+                "department": user["department"],
+                "verification": user["verification"],
+                "status": user["status"],
+                "access": effective_access(conn, user["id"]),
+                "session_id": session_id,
+            }
+    except HTTPException as exc:
+        if exc.status_code in {401, 403}:
+            record_audit(
+                actor=failure_actor,
+                category="AUTHENTICATION",
+                event_type=failure_event,
+                action="LOGIN" if failure_event == "LOGIN_FAILED" else "ACCESS",
+                outcome=failure_outcome,
+                target={"name": account, "type": "USER"},
+                description=failure_description,
+                request=request,
+                metadata={"account": account},
+            )
+        raise
+
+
+@router.post("/logout", status_code=204)
+def logout(request: Request):
+    token = session_token(request)
+    with get_connection() as conn:
+        actor = actor_from_session(conn, token)
+        if actor is None:
+            raise HTTPException(status_code=401, detail="authentication required")
+        conn.execute("DELETE FROM user_sessions WHERE id = ?", (token,))
+        insert_audit(
+            conn,
+            actor=actor,
+            category="AUTHENTICATION",
+            event_type="USER_LOGOUT",
+            action="LOGOUT",
+            target={"id": actor["id"], "name": actor["name"], "type": "USER"},
+            description="Signed out.",
+            request=request,
+            session_id=token,
+        )
 
 
 @router.get("/{user_id}/permissions", response_model=EffectiveAccess)
@@ -237,39 +329,64 @@ def user_permissions(user_id: int):
 
 
 @router.patch("/{user_id}/human", response_model=UserUpdated)
-def update_human(user_id: int, body: HumanUpdate):
-    with get_connection() as conn:
-        user = get_user(conn, user_id)
-        if user is None:
-            raise HTTPException(status_code=404, detail="user not found")
-        fields: dict[str, str | None] = {}
-        if body.name is not None:
-            fields["name"] = _required(body.name, "name")
-        if body.username is not None:
-            fields["username"] = _required(body.username, "username")
-        if body.email is not None:
-            fields["email"] = _email(body.email)
-        if body.department is not None:
-            fields["department"] = _optional(body.department)
-        if body.title is not None:
-            fields["title"] = _optional(body.title)
-        if body.sponsor is not None:
-            fields["sponsor"] = _optional(body.sponsor)
-        if body.verification is not None:
-            fields["verification"] = body.verification
-        if fields:
-            fields["updated_at"] = utc_now()
-            assignments = ", ".join(f"{column} = ?" for column in fields)
-            try:
-                conn.execute(
-                    f"UPDATE users SET {assignments} WHERE id = ?",
-                    [*fields.values(), user_id],
+def update_human(user_id: int, body: HumanUpdate, request: Request):
+    try:
+        with get_connection() as conn:
+            user = get_user(conn, user_id)
+            if user is None:
+                raise HTTPException(status_code=404, detail="user not found")
+            fields: dict[str, str | None] = {}
+            if body.name is not None:
+                fields["name"] = _required(body.name, "name")
+            if body.username is not None:
+                fields["username"] = _required(body.username, "username")
+            if body.email is not None:
+                fields["email"] = _email(body.email)
+            if body.department is not None:
+                fields["department"] = _optional(body.department)
+            if body.title is not None:
+                fields["title"] = _optional(body.title)
+            if body.sponsor is not None:
+                fields["sponsor"] = _optional(body.sponsor)
+            if body.verification is not None:
+                fields["verification"] = body.verification
+            if fields:
+                fields["updated_at"] = utc_now()
+                assignments = ", ".join(f"{column} = ?" for column in fields)
+                try:
+                    conn.execute(
+                        f"UPDATE users SET {assignments} WHERE id = ?",
+                        [*fields.values(), user_id],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise HTTPException(status_code=409, detail="username or email already exists") from exc
+            user = recalculate_user_status(conn, user_id)
+            now = utc_now()
+            item = user_item(user, binding_label(load_binding(conn, user_id), now))
+            item["title"] = user["title"]
+            item["sponsor"] = user["sponsor"]
+            if fields:
+                insert_audit(
+                    conn,
+                    category="USER_ACCESS",
+                    event_type="USER_UPDATED",
+                    action="UPDATE",
+                    target={"id": user["id"], "name": user["name"], "type": "USER"},
+                    description="Updated human identity.",
+                    request=request,
+                    metadata={"changed_fields": [key for key in fields if key != "updated_at"]},
                 )
-            except sqlite3.IntegrityError as exc:
-                raise HTTPException(status_code=409, detail="username or email already exists") from exc
-        user = recalculate_user_status(conn, user_id)
-        now = utc_now()
-        item = user_item(user, binding_label(load_binding(conn, user_id), now))
-        item["title"] = user["title"]
-        item["sponsor"] = user["sponsor"]
-    return item
+            return item
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            record_audit(
+                category="USER_ACCESS",
+                event_type="USER_UPDATED",
+                action="UPDATE",
+                outcome="FAILED",
+                target={"id": str(user_id), "type": "USER"},
+                description="Failed to update human identity.",
+                request=request,
+                metadata={"reason": exc.detail},
+            )
+        raise

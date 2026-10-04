@@ -303,6 +303,55 @@ def init_db() -> None:
             ON user_role_bindings (role_id, status)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                timestamp TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_name TEXT,
+                actor_role TEXT,
+                actor_type TEXT NOT NULL DEFAULT 'USER',
+                category TEXT NOT NULL,
+                action TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                target_id TEXT,
+                target_name TEXT,
+                target_type TEXT,
+                outcome TEXT NOT NULL,
+                description TEXT,
+                ip_address TEXT,
+                user_agent TEXT,
+                session_id TEXT,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_list
+            ON audit_logs (timestamp, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_actor
+            ON audit_logs (actor_id, timestamp)
+            """
+        )
         from .access import seed_access
 
         seed_access(conn)

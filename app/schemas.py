@@ -481,6 +481,7 @@ class LoginOut(BaseModel):
     verification: Verification
     status: UserStatus
     access: EffectiveAccess
+    session_id: str
 
 
 class RoleWrite(BaseModel):
@@ -572,3 +573,84 @@ class BindingItem(BaseModel):
 
 class BindingPage(BaseModel):
     items: list[BindingItem]
+
+
+class AuditTargetIn(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    type: str | None = None
+
+
+class AuditIngest(BaseModel):
+    category: str
+    event_type: str
+    action: str
+    target: AuditTargetIn | None = None
+    outcome: str = "SUCCESS"
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AuditActorOut(BaseModel):
+    id: int | None
+    name: str | None
+    role: str | None
+
+
+class AuditTargetOut(BaseModel):
+    id: str | None
+    name: str | None
+    type: str | None
+
+
+class AuditListItem(BaseModel):
+    eventId: str
+    timestamp: str
+    event: str
+    category: str
+    actor: AuditActorOut
+    target: AuditTargetOut | None
+    action: str
+    outcome: str
+    description: str | None
+
+
+class AuditPage(BaseModel):
+    items: list[AuditListItem]
+    total: int
+    page: int
+    limit: int
+
+
+class AuditSummary(BaseModel):
+    total_activities: int
+    user_actions: int
+    system_actions: int
+    failed_actions: int
+
+
+class AuditCategoryCount(BaseModel):
+    code: str
+    name: str
+    count: int
+
+
+class AuditCategories(BaseModel):
+    categories: list[AuditCategoryCount]
+
+
+class AuditDetail(BaseModel):
+    eventId: str
+    timestamp: str
+    actor: AuditActorOut
+    actorType: str
+    category: str
+    eventType: str
+    action: str
+    target: AuditTargetOut | None
+    outcome: str
+    description: str | None
+    ipAddress: str | None
+    userAgent: str | None
+    sessionId: str | None
+    metadata: dict[str, Any] | None

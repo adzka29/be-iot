@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .alerts import router as alerts_router
+from .audit import router as audit_router
 from .bindings import router as bindings_router
 from .database import init_db
 from .explorer import router as explorer_router
@@ -48,4 +49,5 @@ app.include_router(users_router)
 app.include_router(roles_router)
 app.include_router(catalog_router)
 app.include_router(bindings_router)
+app.include_router(audit_router)
 app.include_router(ingest_router)

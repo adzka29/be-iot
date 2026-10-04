@@ -824,3 +824,111 @@ def test_login_checks_password_and_returns_active_access(client: TestClient):
     assert service.status_code == 403
     assert service.json()["detail"] == "account is not human"
     assert "/users/login" in client.get("/openapi.json").json()["paths"]
+
+
+def test_activity_log_records_user_access_without_trusting_actor(client: TestClient):
+    logged = client.post("/users/login", json={"account": "superadmin", "password": "superadmin"})
+    assert logged.status_code == 200, logged.text
+    token = logged.json()["session_id"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = client.post(
+        "/users/human",
+        headers=headers,
+        json={
+            "name": "Sari Audit",
+            "username": "sari.audit",
+            "email": "sari.audit@trackforge.id",
+            "password": "temporary-password",
+            "department": "Command Operations",
+        },
+    )
+    assert created.status_code == 201, created.text
+    listed = client.get("/audit-logs", params={"search": "Sari Audit", "category": "USER_ACCESS"}).json()
+    assert listed["total"] >= 1
+    item = listed["items"][0]
+    assert item["event"] == "User Created"
+    assert item["category"] == "User Access"
+    assert item["action"] == "Create"
+    assert item["outcome"] == "Success"
+    assert item["actor"]["name"] == "Superadmin"
+    assert item["actor"]["role"] == "Superadmin"
+    assert item["target"]["name"] == "Sari Audit"
+    assert "password" not in str(item)
+
+    detail = client.get(f"/audit-logs/{item['eventId']}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["eventType"] == "USER_CREATED"
+    assert body["category"] == "USER_ACCESS"
+    assert body["action"] == "CREATE"
+    assert body["outcome"] == "SUCCESS"
+    assert body["metadata"]["username"] == "sari.audit"
+    assert "password" not in body["metadata"]
+
+    forged = client.post(
+        "/audit-logs",
+        headers=headers,
+        json={
+            "category": "HISTORY",
+            "event_type": "HISTORY_EXPORTED",
+            "action": "EXPORT",
+            "actor_id": 99,
+            "actor_role": "Superadmin",
+            "description": "Exported history.",
+            "metadata": {"password": "should-not-stick", "format": "csv"},
+        },
+    )
+    assert forged.status_code == 201, forged.text
+    assert forged.json()["actor"]["id"] == logged.json()["id"]
+    assert forged.json()["metadata"] == {"format": "csv"}
+    assert client.post(
+        "/audit-logs",
+        json={"category": "HISTORY", "event_type": "HISTORY_EXPORTED", "action": "EXPORT"},
+    ).status_code == 401
+
+    duplicate = client.post(
+        "/users/human",
+        headers=headers,
+        json={
+            "name": "Sari Audit",
+            "username": "sari.audit",
+            "email": "other.audit@trackforge.id",
+            "password": "temporary-password",
+        },
+    )
+    assert duplicate.status_code == 409
+    failed = client.get("/audit-logs", params={"outcome": "FAILED", "search": "Sari Audit"}).json()
+    assert failed["total"] >= 1
+    assert failed["items"][0]["outcome"] == "Failed"
+
+    summary = client.get("/audit-logs/summary").json()
+    assert summary["total_activities"] >= 2
+    assert summary["failed_actions"] >= 1
+    categories = client.get("/audit-logs/categories").json()["categories"]
+    assert any(category["code"] == "USER_ACCESS" and category["count"] >= 1 for category in categories)
+
+    mine = client.get("/audit-logs/me", headers=headers)
+    assert mine.status_code == 200, mine.text
+    assert all(row["actor"]["name"] == "Superadmin" for row in mine.json()["items"])
+    assert client.get("/audit-logs/me").status_code == 401
+
+    exported = client.get("/audit-logs/export", params={"category": "USER_ACCESS", "timeRange": "24h"})
+    assert exported.status_code == 200
+    assert "Sari Audit" in exported.text
+    assert "User Access" in exported.text
+    assert "text/csv" in exported.headers["content-type"]
+
+    denied = client.put(
+        f"/roles/{next(role['id'] for role in client.get('/roles').json()['items'] if role['name'] == 'superadmin')}",
+        headers=headers,
+        json={"name": "superadmin", "duty_category": "Platform Administration", "description": "Changed."},
+    )
+    assert denied.status_code == 403
+    denied_logs = client.get("/audit-logs", params={"outcome": "DENIED"}).json()
+    assert denied_logs["total"] >= 1
+
+    assert client.post("/users/logout", headers=headers).status_code == 204
+    assert client.get("/audit-logs/me", headers=headers).status_code == 401
+    assert client.delete(f"/audit-logs/{item['eventId']}").status_code == 405
+    assert "/audit-logs/me" in client.get("/openapi.json").json()["paths"]
