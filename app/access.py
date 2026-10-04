@@ -349,7 +349,7 @@ def require_permission(domain: str, action: str = "read"):
 
 _SUPERADMIN_USERNAME = "superadmin"
 _SUPERADMIN_EMAIL = "superadmin@trackforge.id"
-_SUPERADMIN_PASSWORD = "admin123"
+_SUPERADMIN_PASSWORD = "superadmin"
 
 
 def _grant_codes(conn: sqlite3.Connection, role_id: int, codes: Iterable[str], now: str) -> None:
@@ -417,6 +417,18 @@ def ensure_superadmin_account(conn: sqlite3.Connection) -> None:
         user_id = int(cursor.lastrowid)
     else:
         user_id = user["id"]
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?,
+                email = ?,
+                verification = 'VERIFIED',
+                status = CASE WHEN status IN ('SUSPENDED', 'DISABLED') THEN 'INACTIVE' ELSE status END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (hash_password(_SUPERADMIN_PASSWORD), _SUPERADMIN_EMAIL, now, user_id),
+        )
     binding = load_binding(conn, user_id)
     if binding is None:
         conn.execute(

@@ -614,7 +614,7 @@ def test_user_access_registry_role_and_binding(client: TestClient):
     ).status_code == 403
     assert client.delete(f"/roles/{superadmin['id']}").status_code == 403
 
-    seeded = client.post("/users/login", json={"account": "superadmin", "password": "admin123"})
+    seeded = client.post("/users/login", json={"account": "superadmin", "password": "superadmin"})
     assert seeded.status_code == 200, seeded.text
     assert seeded.json()["username"] == "superadmin"
     assert seeded.json()["status"] == "ACTIVE"
