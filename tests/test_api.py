@@ -614,14 +614,17 @@ def test_user_access_registry_role_and_binding(client: TestClient):
     ).status_code == 403
     assert client.delete(f"/roles/{superadmin['id']}").status_code == 403
 
-    empty = client.get("/users/summary").json()
-    assert empty == {
-        "total_humans": 0,
-        "active_humans": 0,
-        "inactive_humans": 0,
-        "total_services": 0,
-        "pending_verification": 0,
-    }
+    seeded = client.post("/users/login", json={"account": "superadmin", "password": "admin123"})
+    assert seeded.status_code == 200, seeded.text
+    assert seeded.json()["username"] == "superadmin"
+    assert seeded.json()["status"] == "ACTIVE"
+    assert seeded.json()["access"]["role"] == "superadmin"
+    assert len(seeded.json()["access"]["permissions"]) == 30
+    summary = client.get("/users/summary").json()
+    assert summary["total_humans"] == 1
+    assert summary["active_humans"] == 1
+    assert summary["inactive_humans"] == 0
+    assert summary["pending_verification"] == 0
     created = client.post(
         "/users/human",
         json={
@@ -711,7 +714,7 @@ def test_user_access_registry_role_and_binding(client: TestClient):
     access = client.get(f"/users/{user_id}/permissions").json()
     assert access["role"] == "operations planner"
     assert access["permissions"] == ["history.read"]
-    assert client.get("/users/summary").json()["active_humans"] == 1
+    assert client.get("/users/summary").json()["active_humans"] == 2
 
     pending = client.patch(f"/users/{user_id}/human", json={"verification": "PENDING"})
     assert pending.status_code == 200, pending.text

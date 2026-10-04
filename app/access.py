@@ -347,6 +347,99 @@ def require_permission(domain: str, action: str = "read"):
     return Depends(dependency)
 
 
+_SUPERADMIN_USERNAME = "superadmin"
+_SUPERADMIN_EMAIL = "superadmin@trackforge.id"
+_SUPERADMIN_PASSWORD = "admin123"
+
+
+def _grant_codes(conn: sqlite3.Connection, role_id: int, codes: Iterable[str], now: str) -> None:
+    expanded = expand_permission_codes(codes)
+    marks = ", ".join("?" for _ in expanded)
+    permissions = conn.execute(
+        f"SELECT id FROM permissions WHERE code IN ({marks})",
+        tuple(expanded),
+    ).fetchall()
+    if len(permissions) != len(expanded):
+        raise RuntimeError("permission catalog is missing a grant")
+    wanted = {row["id"] for row in permissions}
+    current = {
+        row["permission_id"]
+        for row in conn.execute(
+            "SELECT permission_id FROM role_permissions WHERE role_id = ?",
+            (role_id,),
+        )
+    }
+    if current == wanted:
+        return
+    conn.execute("DELETE FROM role_permissions WHERE role_id = ?", (role_id,))
+    for permission_id in sorted(wanted):
+        conn.execute(
+            """
+            INSERT INTO role_permissions (role_id, permission_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (role_id, permission_id, now),
+        )
+
+
+def ensure_superadmin_account(conn: sqlite3.Connection) -> None:
+    now = utc_now()
+    role = conn.execute(
+        "SELECT id FROM roles WHERE name = 'superadmin' AND deleted_at IS NULL"
+    ).fetchone()
+    if role is None:
+        return
+    _grant_codes(conn, role["id"], DOMAINS, now)
+    user = conn.execute(
+        """
+        SELECT * FROM users
+        WHERE deleted_at IS NULL AND username = ? COLLATE NOCASE
+        """,
+        (_SUPERADMIN_USERNAME,),
+    ).fetchone()
+    if user is None:
+        cursor = conn.execute(
+            """
+            INSERT INTO users (
+                identity_type, name, username, email, password_hash, department, title,
+                verification, status, created_at, updated_at
+            )
+            VALUES ('HUMAN', 'Superadmin', ?, ?, ?, 'Platform Administration', 'Superadmin', 'VERIFIED', 'ACTIVE', ?, ?)
+            """,
+            (
+                _SUPERADMIN_USERNAME,
+                _SUPERADMIN_EMAIL,
+                hash_password(_SUPERADMIN_PASSWORD),
+                now,
+                now,
+            ),
+        )
+        user_id = int(cursor.lastrowid)
+    else:
+        user_id = user["id"]
+    binding = load_binding(conn, user_id)
+    if binding is None:
+        conn.execute(
+            """
+            INSERT INTO user_role_bindings (
+                user_id, role_id, status, description, created_at, updated_at
+            )
+            VALUES (?, ?, 'ACTIVE', 'Platform administration', ?, ?)
+            """,
+            (user_id, role["id"], now, now),
+        )
+    elif binding["role_id"] != role["id"] or binding["status"] != "ACTIVE":
+        conn.execute(
+            """
+            UPDATE user_role_bindings
+            SET role_id = ?, status = 'ACTIVE', updated_at = ?
+            WHERE id = ?
+            """,
+            (role["id"], now, binding["id"]),
+        )
+    recalculate_user_status(conn, user_id)
+
+
 def seed_access(conn: sqlite3.Connection) -> None:
     now = utc_now()
     permission_count = conn.execute("SELECT COUNT(*) AS n FROM permissions").fetchone()["n"]
@@ -368,8 +461,12 @@ def seed_access(conn: sqlite3.Connection) -> None:
                 (f"{domain}.read", f"{label} Read", domain, f"Read {label}.", now),
             )
     role_count = conn.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"]
-    if role_count:
-        return
+    if role_count == 0:
+        _seed_roles(conn, now)
+    ensure_superadmin_account(conn)
+
+
+def _seed_roles(conn: sqlite3.Connection, now: str) -> None:
     for role in _SEED_ROLES:
         cursor = conn.execute(
             """
@@ -389,20 +486,4 @@ def seed_access(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
-        role_id = int(cursor.lastrowid)
-        codes = expand_permission_codes(role["grants"])
-        marks = ", ".join("?" for _ in codes)
-        permissions = conn.execute(
-            f"SELECT id FROM permissions WHERE code IN ({marks})",
-            tuple(codes),
-        ).fetchall()
-        if len(permissions) != len(codes):
-            raise RuntimeError(f"permission catalog is missing a grant for {role['name']}")
-        for permission in permissions:
-            conn.execute(
-                """
-                INSERT INTO role_permissions (role_id, permission_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (role_id, permission["id"], now),
-            )
+        _grant_codes(conn, int(cursor.lastrowid), role["grants"], now)
