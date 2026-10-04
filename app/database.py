@@ -137,33 +137,51 @@ def init_db() -> None:
             from .seed import seed
 
             seed(conn)
+        existing_alerts = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alerts'"
+        ).fetchone()
+        if existing_alerts is not None:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
+            if "alert_code" not in columns or "first_seen_at" not in columns:
+                conn.execute("DROP TABLE alerts")
+        conn.execute("DROP INDEX IF EXISTS idx_alerts_dedupe")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_code TEXT NOT NULL,
                 alert_type TEXT NOT NULL,
                 severity TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                status TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
                 soldier_id INTEGER,
                 group_id TEXT,
                 gateway_id TEXT,
-                event_time TEXT NOT NULL,
-                received_at TEXT NOT NULL,
-                position_source TEXT,
-                lat REAL,
-                lon REAL,
-                details TEXT NOT NULL,
                 source_record_id INTEGER,
+                event_time TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                position_source TEXT,
+                latitude REAL,
+                longitude REAL,
+                message TEXT NOT NULL,
+                acknowledged_at TEXT,
+                acknowledged_by TEXT,
+                resolved_at TEXT,
+                resolved_by TEXT,
+                derived_from TEXT NOT NULL,
                 record_origin TEXT,
-                data_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                details_json TEXT NOT NULL
             )
             """
         )
         conn.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_dedupe
-            ON alerts (soldier_id, alert_type, event_time)
+            CREATE INDEX IF NOT EXISTS idx_alerts_open
+            ON alerts (soldier_id, alert_type, status)
             """
         )
         conn.execute(
@@ -172,9 +190,12 @@ def init_db() -> None:
             ON alerts (event_time, id)
             """
         )
-        from .alert_rules import backfill_alerts
+        alert_count = conn.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"]
+        explorer_count = conn.execute("SELECT COUNT(*) AS n FROM explorer_records").fetchone()["n"]
+        if alert_count == 0 and explorer_count and os.environ.get("TRACKFORGE_SEED", "1") != "0":
+            from .alert_rules import seed_alerts
 
-        backfill_alerts(conn)
+            seed_alerts(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS geofences (

@@ -19,7 +19,18 @@ def freshness_between(event_time: str, received_at: str) -> str:
     return "STALE"
 
 
-def parse_event_time(value: str) -> tuple[str, int]:
+def canonical_time(value: int | str) -> str:
+    iso, _ = parse_event_time(value)
+    return iso
+
+
+def parse_event_time(value: int | str) -> tuple[str, int]:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("timestamp must be ISO-8601 or unix seconds")
+    if isinstance(value, int):
+        unix = value
+        iso = datetime.fromtimestamp(unix, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return iso, unix
     text = value.strip()
     if text.isdigit():
         unix = int(text)

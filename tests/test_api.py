@@ -58,6 +58,74 @@ def test_telemetry_keeps_sos_flag_visible(client: TestClient):
     assert listed["items"][0]["id"] == body["id"]
 
 
+def test_direct_telemetry_uses_utc_and_21_byte_raw(client: TestClient):
+    flags = encode_flags()
+    unix = 1791115200
+    response = client.post(
+        "/api/ingest/telemetry",
+        json={
+            "soldier_id": 77,
+            "seq": 4,
+            "timestamp": unix,
+            "lat": -6.2,
+            "lon": 106.8,
+            "hr": 80,
+            "hrv": 40,
+            "spo2": 98,
+            "temp": 36,
+            "batt": 90,
+            "flags": flags,
+            "received_at": "2026-10-04T19:00:04+07:00",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["event_time"] == "2026-10-04T12:00:00Z"
+    assert body["received_at"] == "2026-10-04T12:00:04Z"
+    assert body["data"]["timestamp"] == unix
+    assert body["raw_format"] == "PAYLOAD_21"
+    assert body["raw_bytes_length"] == 21
+    assert body["raw_hex"] == pack_payload(
+        soldier_id=77,
+        seq=4,
+        timestamp=unix,
+        lat=-6.2,
+        lon=106.8,
+        hr=80,
+        hrv=40,
+        spo2=98,
+        temp=36,
+        batt=90,
+        flags=flags,
+    ).hex()
+
+    rejected = client.post(
+        "/api/ingest/telemetry",
+        json={
+            "soldier_id": 78,
+            "seq": 1,
+            "timestamp": "2026-10-04T12:00:00Z",
+            "lat": -6.2,
+            "lon": 106.8,
+            "hr": 80,
+            "hrv": 40,
+            "spo2": 98,
+            "temp": 36,
+            "batt": 90,
+            "flags": flags,
+            "raw_hex": "abcd",
+        },
+    )
+    assert rejected.status_code == 400
+
+    listed = client.get(
+        "/api/explorer",
+        params={"from_time": "2026-10-04T15:00:00+07:00", "to_time": str(unix), "soldier_id": 77},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+
+
 def test_mesh_frame_decodes_25_bytes(client: TestClient):
     flags = encode_flags(position="GNSS")
     payload = pack_payload(
@@ -250,8 +318,9 @@ def test_explorer_search_detail_options_and_csv(client: TestClient):
 def test_sos_opens_alert_and_stays_in_explorer(client: TestClient):
     seeded = client.get("/api/alerts", params={"alert_type": "SOS", "soldier_id": 101}).json()
     assert seeded["total"] == 1
-    assert seeded["items"][0]["severity"] == "critical"
-    assert seeded["items"][0]["details"] == "SOS button pressed"
+    assert seeded["items"][0]["severity"] == "CRITICAL"
+    assert seeded["items"][0]["message"] == "SOS button pressed"
+    assert seeded["items"][0]["source_record"]["soldier_id"] == 101
     explorer_before = client.get("/api/explorer/summary").json()["total"]
 
     flags = encode_flags(sos=True, strap=True, position="GNSS")
@@ -312,3 +381,186 @@ def test_sos_rows_stay_out_of_explorer(client: TestClient):
     listed = client.get("/api/explorer", params={"q": "sos-hidden-marker"}).json()
     assert listed["total"] == 0
     assert client.get(f"/api/explorer/{hidden_id}").status_code == 404
+
+
+def test_alert_seed_distribution(client: TestClient):
+    summary = client.get("/api/alerts/summary").json()
+    assert summary["total"] == 36
+    severities = {item["severity"]: item["count"] for item in summary["by_severity"]}
+    kinds = {item["alert_type"]: item["count"] for item in summary["by_type"]}
+    assert severities == {"CRITICAL": 6, "WARNING": 12, "INFO": 18}
+    assert kinds == {
+        "SOS": 3,
+        "CASUALTY": 1,
+        "ARRHYTHMIA": 2,
+        "LOW_BATTERY": 7,
+        "HEAT_STRESS": 5,
+        "STRAP_DISCONNECTED": 4,
+        "NO_CONTACT": 14,
+    }
+    sos = client.get("/api/alerts/sos").json()
+    assert sos["total"] == 3
+    options = client.get("/api/alerts/filters/options").json()
+    assert "SOS" in options["alert_types"]
+    assert "CRITICAL" in options["severities"]
+    schema = client.get("/openapi.json").json()
+    assert "/api/alerts/sos" in schema["paths"]
+    assert "/api/alerts/{alert_id}/acknowledge" in schema["paths"]
+    assert "alert_code" in schema["components"]["schemas"]["AlertOut"]["properties"]
+    assert "source_record" in schema["components"]["schemas"]["AlertOut"]["properties"]
+
+
+def test_arrhythmia_episode_does_not_duplicate(client: TestClient):
+    def post(minute: int, *, active: bool):
+        flags = encode_flags(arrhythmia=active, strap=True)
+        response = client.post(
+            "/api/ingest/telemetry",
+            json={
+                "soldier_id": 8800,
+                "seq": minute,
+                "timestamp": f"2026-10-04T12:{minute:02d}:00Z",
+                "lat": -6.2,
+                "lon": 106.8,
+                "hr": 90,
+                "hrv": 30,
+                "spo2": 97,
+                "temp": 36,
+                "batt": 80,
+                "flags": flags,
+                "group_id": "Alpha",
+                "gateway_id": "GW-01",
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    first = post(0, active=True)
+    second = post(1, active=True)
+    third = post(2, active=True)
+    page = client.get("/api/alerts", params={"soldier_id": 8800, "alert_type": "ARRHYTHMIA"}).json()
+    assert page["total"] == 1
+    episode = page["items"][0]
+    assert episode["source_record_id"] == third
+    assert episode["first_seen_at"] == "2026-10-04T12:00:00Z"
+    assert episode["last_seen_at"] == "2026-10-04T12:02:00Z"
+    assert episode["status"] == "ACTIVE"
+    assert first != second
+
+    post(3, active=False)
+    cleared = client.get("/api/alerts", params={"soldier_id": 8800, "alert_type": "ARRHYTHMIA"}).json()
+    assert cleared["total"] == 1
+    assert cleared["items"][0]["status"] == "CLEARED"
+
+    post(10, active=True)
+    reopened = client.get("/api/alerts", params={"soldier_id": 8800, "alert_type": "ARRHYTHMIA"}).json()
+    assert reopened["total"] == 2
+    assert reopened["items"][0]["status"] == "ACTIVE"
+    assert reopened["items"][0]["event_time"] == "2026-10-04T12:10:00Z"
+
+
+def test_acknowledge_and_resolve(client: TestClient):
+    alert_id = client.get("/api/alerts", params={"alert_type": "CASUALTY"}).json()["items"][0]["id"]
+    acknowledged = client.post(f"/api/alerts/{alert_id}/acknowledge", json={"by": "medic-1"})
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["status"] == "ACKNOWLEDGED"
+    assert acknowledged.json()["acknowledged_by"] == "medic-1"
+    resolved = client.post(f"/api/alerts/{alert_id}/resolve", json={"by": "medic-1"})
+    assert resolved.status_code == 200, resolved.text
+    body = resolved.json()
+    assert body["status"] == "RESOLVED"
+    assert body["resolved_by"] == "medic-1"
+    assert client.post(f"/api/alerts/{alert_id}/resolve", json={"by": "medic-1"}).status_code == 409
+
+
+def test_no_contact_resolves_when_telemetry_returns(client: TestClient):
+    before = client.get("/api/alerts", params={"soldier_id": 301, "alert_type": "NO_CONTACT"}).json()
+    assert before["total"] == 1
+    assert before["items"][0]["status"] == "ACTIVE"
+    assert before["items"][0]["derived_from"] == "NO_TELEMETRY"
+    flags = encode_flags(strap=True)
+    response = client.post(
+        "/api/ingest/telemetry",
+        json={
+            "soldier_id": 301,
+            "seq": 1,
+            "timestamp": "2026-10-04T08:00:00Z",
+            "lat": -6.2,
+            "lon": 106.8,
+            "hr": 70,
+            "hrv": 40,
+            "spo2": 98,
+            "temp": 36,
+            "batt": 90,
+            "flags": flags,
+        },
+    )
+    assert response.status_code == 200, response.text
+    after = client.get("/api/alerts", params={"soldier_id": 301, "alert_type": "NO_CONTACT"}).json()
+    assert after["total"] == 1
+    assert after["items"][0]["status"] == "RESOLVED"
+    assert after["items"][0]["resolved_by"] == "engine"
+
+
+def test_history_reads_explorer_without_double_counting(client: TestClient):
+    params = {
+        "scope": "SOLDIER",
+        "soldier_id": 104,
+        "from_time": "2026-10-04T08:00:00Z",
+        "to_time": "2026-10-04T08:30:00Z",
+    }
+    summary = client.get("/api/history/summary", params=params)
+    assert summary.status_code == 200, summary.text
+    cards = summary.json()["cards"]
+    assert cards["total_records"] == 60
+    assert cards["distance_is_derived"] is True
+    assert cards["total_distance_km"] > 0
+    assert cards["heart_rate_avg_bpm"] is not None
+    assert cards["battery_avg_percent"] is not None
+
+    telemetry = client.get(
+        "/api/history",
+        params={**params, "history_data_type": "TELEMETRY", "limit": 500},
+    ).json()
+    assert telemetry["total"] == 30
+    assert {item["data_type"] for item in telemetry["items"]} == {"TELEMETRY"}
+
+    track = client.get("/api/history/track", params=params).json()["points"]
+    assert len(track) == 30
+    assert [point["event_time"] for point in track] == sorted(point["event_time"] for point in track)
+
+    gnss = client.get(
+        "/api/history/track",
+        params={**params, "position_source": "GNSS"},
+    ).json()["points"]
+    assert 0 < len(gnss) < len(track)
+
+    detail = client.get(f"/api/history/point/{track[0]['source_id']}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["id"] == f"R-{track[0]['source_id']}"
+    assert body["details"]["vitals"]["hr"] is not None
+    assert body["details"]["raw_data"]["raw_bytes_length"] == 21
+    assert client.get("/api/history/point/999999").status_code == 404
+
+    charts = client.get("/api/history/charts", params=params).json()["buckets"]
+    assert charts
+    assert charts[0]["samples"] == 30
+
+    stats = client.get("/api/history/statistics", params=params).json()
+    assert stats["position_points"] == 30
+    assert stats["soldiers"] == 1
+
+    options = client.get("/api/history/filters/options", params=params).json()
+    assert "MESH_FRAME" in options["data_types"]
+    assert "GNSS" in options["position_sources"]
+
+    exported = client.get("/api/history/export.csv", params={**params, "history_data_type": "UPLINK"})
+    assert exported.status_code == 200
+    assert "text/csv" in exported.headers["content-type"]
+
+    assert client.get("/api/history/summary", params={"scope": "SOLDIER"}).status_code == 400
+    group = client.get("/api/history/summary", params={"scope": "GROUP", "group_id": "Alpha"}).json()
+    assert group["cards"]["total_records"] == 505
+    schema = client.get("/openapi.json").json()
+    assert "/api/history/track" in schema["paths"]
+    assert "/api/history/point/{record_id}" in schema["paths"]

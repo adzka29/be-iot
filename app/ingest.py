@@ -2,21 +2,21 @@ from fastapi import APIRouter, HTTPException
 
 from .alert_rules import raise_alerts
 from .database import get_connection, get_record, insert_record, record_to_api
-from .frame import decode_mesh_frame, pack_payload, parse_hex
+from .frame import PAYLOAD_LEN, decode_mesh_frame, pack_payload, parse_hex
 from .records import make_record, parse_event_time, telemetry_data, utc_now
 from .schemas import BeaconIn, ExplorerRecord, MeshFrameIn, SpecialIn, SystemIn, TelemetryIn, UplinkIn
 
 router = APIRouter(prefix="/api/ingest", tags=["Ingest"])
 
 
-def _clock(value: str) -> tuple[str, int]:
+def _clock(value: int | str) -> tuple[str, int]:
     try:
         return parse_event_time(value)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _received(value: str | None) -> str:
+def _received(value: int | str | None) -> str:
     if not value:
         return utc_now()
     received_at, _ = _clock(value)
@@ -38,7 +38,6 @@ def _save(record: dict, soldier_payload: dict | None = None) -> dict:
                 group_id=record["group_id"],
                 gateway_id=record["gateway_id"],
                 event_time=record["event_time"],
-                received_at=record["received_at"],
                 position_source=record["position_source"],
                 record_origin=record["record_origin"],
                 payload=soldier_payload,
@@ -65,21 +64,32 @@ def ingest_telemetry(body: TelemetryIn):
         batt=body.batt,
         flags=body.flags,
     )
-    raw_hex = body.raw_hex
-    if raw_hex is None:
-        raw_hex = pack_payload(
-            soldier_id=body.soldier_id,
-            seq=body.seq,
-            timestamp=unix,
-            lat=body.lat,
-            lon=body.lon,
-            hr=body.hr,
-            hrv=body.hrv,
-            spo2=body.spo2,
-            temp=body.temp,
-            batt=body.batt,
-            flags=body.flags,
-        ).hex()
+    packed = pack_payload(
+        soldier_id=body.soldier_id,
+        seq=body.seq,
+        timestamp=unix,
+        lat=body.lat,
+        lon=body.lon,
+        hr=body.hr,
+        hrv=body.hrv,
+        spo2=body.spo2,
+        temp=body.temp,
+        batt=body.batt,
+        flags=body.flags,
+    )
+    if body.raw_hex:
+        try:
+            supplied = parse_hex(body.raw_hex)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if len(supplied) != PAYLOAD_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"telemetry payload must be {PAYLOAD_LEN} bytes, got {len(supplied)}",
+            )
+        raw_hex = supplied.hex()
+    else:
+        raw_hex = packed.hex()
     return _save(
         make_record(
             category="TELEMETRY",
@@ -96,7 +106,7 @@ def ingest_telemetry(body: TelemetryIn):
             freshness=body.freshness or "FRESH",
             severity=None,
             record_origin=_origin(body.record_origin),
-            raw_format=body.raw_format or "PAYLOAD_21",
+            raw_format="PAYLOAD_21",
             raw_hex=raw_hex,
             data=data,
         ),

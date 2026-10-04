@@ -7,6 +7,7 @@ from .alerts import router as alerts_router
 from .database import init_db
 from .explorer import router as explorer_router
 from .geofences import router as geofences_router
+from .history import router as history_router
 from .ingest import router as ingest_router
 
 
@@ -39,4 +40,5 @@ def health():
 app.include_router(explorer_router)
 app.include_router(geofences_router)
 app.include_router(alerts_router)
+app.include_router(history_router)
 app.include_router(ingest_router)

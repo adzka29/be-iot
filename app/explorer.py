@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from .database import get_connection, get_record, record_to_api
+from .records import canonical_time
 from .schemas import ExplorerPage, ExplorerRecord, ExplorerSummary, FilterOptions
 
 router = APIRouter(prefix="/api/explorer", tags=["Explorer"])
@@ -47,6 +48,13 @@ _OPTION_COLUMNS = (
     ("record_origins", "record_origin"),
     ("raw_formats", "raw_format"),
 )
+
+
+def _time_bound(value: str) -> str:
+    try:
+        return canonical_time(value)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _filters(
@@ -97,10 +105,10 @@ def _filters(
         params.append(soldier_id)
     if from_time:
         conditions.append("event_time >= ?")
-        params.append(from_time)
+        params.append(_time_bound(from_time))
     if to_time:
         conditions.append("event_time <= ?")
-        params.append(to_time)
+        params.append(_time_bound(to_time))
     if q and q.strip():
         needle = f"%{q.strip()}%"
         conditions.append(
