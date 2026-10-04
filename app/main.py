@@ -4,11 +4,14 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .alerts import router as alerts_router
+from .bindings import router as bindings_router
 from .database import init_db
 from .explorer import router as explorer_router
 from .geofences import router as geofences_router
 from .history import router as history_router
 from .ingest import router as ingest_router
+from .roles import catalog_router, router as roles_router
+from .users import router as users_router
 
 
 class HealthOut(BaseModel):
@@ -41,4 +44,8 @@ app.include_router(explorer_router)
 app.include_router(geofences_router)
 app.include_router(alerts_router)
 app.include_router(history_router)
+app.include_router(users_router)
+app.include_router(roles_router)
+app.include_router(catalog_router)
+app.include_router(bindings_router)
 app.include_router(ingest_router)

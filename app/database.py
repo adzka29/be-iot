@@ -66,6 +66,7 @@ def _connect() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -211,6 +212,100 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_type TEXT NOT NULL
+                    CHECK (identity_type IN ('HUMAN', 'SERVICE')),
+                name TEXT NOT NULL,
+                username TEXT UNIQUE,
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                department TEXT,
+                title TEXT,
+                sponsor TEXT,
+                verification TEXT NOT NULL DEFAULT 'VERIFIED'
+                    CHECK (verification IN ('PENDING', 'VERIFIED')),
+                status TEXT NOT NULL DEFAULT 'INACTIVE'
+                    CHECK (status IN ('INACTIVE', 'ACTIVE', 'SUSPENDED', 'DISABLED')),
+                deleted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                duty_category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                privilege_narrative TEXT,
+                least_privilege_baseline TEXT,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                is_protected INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                action_type TEXT NOT NULL
+                    CHECK (action_type IN ('READ', 'ALL_ACTIONS')),
+                description TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id INTEGER NOT NULL,
+                permission_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (role_id, permission_id),
+                FOREIGN KEY (role_id) REFERENCES roles(id),
+                FOREIGN KEY (permission_id) REFERENCES permissions(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_role_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE'
+                    CHECK (status IN ('ACTIVE', 'SUSPENDED', 'REVOKED')),
+                valid_from TEXT,
+                valid_until TEXT,
+                description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (role_id) REFERENCES roles(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bindings_role
+            ON user_role_bindings (role_id, status)
+            """
+        )
+        from .access import seed_access
+
+        seed_access(conn)
 
 
 def insert_record(conn: sqlite3.Connection, record: dict) -> int:

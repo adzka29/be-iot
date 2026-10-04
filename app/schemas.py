@@ -389,3 +389,186 @@ class SystemIn(BaseModel):
     group_id: str | None = None
     details: dict[str, Any] | None = None
     record_origin: str | None = None
+
+
+IdentityType = Literal["HUMAN", "SERVICE"]
+Verification = Literal["PENDING", "VERIFIED"]
+UserStatus = Literal["INACTIVE", "ACTIVE", "SUSPENDED", "DISABLED"]
+AccessBinding = Literal["BOUND", "NO_BINDING"]
+BindingStatus = Literal["ACTIVE", "SUSPENDED", "REVOKED"]
+PermissionAction = Literal["READ", "ALL_ACTIONS"]
+
+
+class UserItem(BaseModel):
+    id: int
+    identity_type: IdentityType
+    name: str
+    username: str | None
+    email: str | None
+    department: str | None
+    verification: Verification
+    status: UserStatus
+    access_binding: AccessBinding
+
+
+class UserPage(BaseModel):
+    items: list[UserItem]
+    total: int
+    page: int
+    limit: int
+
+
+class UserSummary(BaseModel):
+    total_humans: int
+    active_humans: int
+    inactive_humans: int
+    total_services: int
+    pending_verification: int
+
+
+class UserCreated(BaseModel):
+    id: int
+    name: str
+    verification: Verification
+    access_binding: AccessBinding
+    status: UserStatus
+
+
+class UserUpdated(UserItem):
+    title: str | None
+    sponsor: str | None
+
+
+class HumanCreate(BaseModel):
+    name: str
+    username: str
+    email: str
+    password: str
+    department: str | None = None
+    title: str | None = None
+
+
+class HumanUpdate(BaseModel):
+    name: str | None = None
+    username: str | None = None
+    email: str | None = None
+    department: str | None = None
+    title: str | None = None
+    sponsor: str | None = None
+    verification: Verification | None = None
+
+
+class EffectiveAccess(BaseModel):
+    user_id: int
+    binding_id: int | None
+    binding_status: BindingStatus | None
+    role_id: int | None
+    role: str | None
+    permissions: list[str]
+
+
+class LoginIn(BaseModel):
+    account: str
+    password: str
+
+
+class LoginOut(BaseModel):
+    id: int
+    name: str
+    username: str | None
+    email: str | None
+    department: str | None
+    verification: Verification
+    status: UserStatus
+    access: EffectiveAccess
+
+
+class RoleWrite(BaseModel):
+    name: str
+    duty_category: str
+    description: str
+    privilege_narrative: str | None = None
+    least_privilege_baseline: str | None = None
+
+
+class RoleItem(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    duty_category: str
+    description: str
+    privilege_narrative: str | None
+    least_privilege_baseline: str | None
+    is_system: bool
+    is_protected: bool
+    assigned_users: int
+
+
+class RolePage(BaseModel):
+    items: list[RoleItem]
+
+
+class RoleSummary(BaseModel):
+    total: int
+    system_roles: int
+    protected_roles: int
+    custom_roles: int
+
+
+class RolePermissionCode(BaseModel):
+    code: str
+
+
+class RoleDetail(RoleItem):
+    permissions: list[RolePermissionCode]
+
+
+class PermissionItem(BaseModel):
+    id: int
+    code: str
+    name: str
+    domain: str
+    action_type: PermissionAction
+    description: str | None
+
+
+class PermissionCatalog(BaseModel):
+    items: list[PermissionItem]
+
+
+class RolePermissionSet(BaseModel):
+    role_id: int
+    permissions: list[PermissionItem]
+
+
+class RolePermissionUpdate(BaseModel):
+    permissionIds: list[int]
+
+
+class BindingWrite(BaseModel):
+    user_id: int
+    role_id: int
+    description: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+class BindingStatusUpdate(BaseModel):
+    status: BindingStatus
+
+
+class BindingItem(BaseModel):
+    id: int
+    user_id: int
+    role_id: int
+    role: str | None
+    status: BindingStatus
+    valid_from: str | None
+    valid_until: str | None
+    description: str | None
+    access_binding: AccessBinding
+    user_status: UserStatus
+
+
+class BindingPage(BaseModel):
+    items: list[BindingItem]

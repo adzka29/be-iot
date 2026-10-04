@@ -564,3 +564,260 @@ def test_history_reads_explorer_without_double_counting(client: TestClient):
     schema = client.get("/openapi.json").json()
     assert "/api/history/track" in schema["paths"]
     assert "/api/history/point/{record_id}" in schema["paths"]
+
+
+def test_user_access_registry_role_and_binding(client: TestClient):
+    import os
+    import sqlite3
+
+    from app.access import has_permission
+
+    assert has_permission({"history"}, "history", "read") is True
+    assert has_permission({"history"}, "history", "all") is True
+    assert has_permission({"history.read"}, "history", "read") is True
+    assert has_permission({"history.read"}, "history", "all") is False
+
+    catalog = client.get("/permissions").json()["items"]
+    codes = {item["code"] for item in catalog}
+    assert len(codes) == 30
+    assert "history" in codes and "history.read" in codes
+    assert client.get("/roles/permissions").json()["items"] == catalog
+
+    roles = client.get("/roles").json()["items"]
+    assert [role["name"] for role in roles] == [
+        "superadmin",
+        "operations commander",
+        "operations officer",
+        "field operator",
+        "device & fleet admin",
+        "viewer",
+    ]
+    assert all(role["is_protected"] and role["is_system"] for role in roles)
+    by_name = {role["name"]: role for role in roles}
+    commander = client.get(f"/roles/{by_name['operations commander']['id']}/detail").json()
+    commander_codes = {item["code"] for item in commander["permissions"]}
+    assert "overview" in commander_codes and "overview.read" in commander_codes
+    assert "user_access" not in commander_codes
+    assert commander["display_name"] == "Operations Commander"
+    viewer = client.get(f"/roles/{by_name['viewer']['id']}/permissions").json()["permissions"]
+    assert viewer and all(item["code"].endswith(".read") for item in viewer)
+    field = {item["code"] for item in client.get(f"/roles/{by_name['field operator']['id']}/permissions").json()["permissions"]}
+    assert "history.read" in field and "history" not in field
+    superadmin = by_name["superadmin"]
+    assert client.put(
+        f"/roles/{superadmin['id']}",
+        json={
+            "name": "superadmin",
+            "duty_category": "Platform Administration",
+            "description": "Changed.",
+        },
+    ).status_code == 403
+    assert client.delete(f"/roles/{superadmin['id']}").status_code == 403
+
+    empty = client.get("/users/summary").json()
+    assert empty == {
+        "total_humans": 0,
+        "active_humans": 0,
+        "inactive_humans": 0,
+        "total_services": 0,
+        "pending_verification": 0,
+    }
+    created = client.post(
+        "/users/human",
+        json={
+            "name": "Andi Pratama",
+            "username": "andi.pratama",
+            "email": "Andi@trackforge.id",
+            "password": "temporary-password",
+            "department": "Command Operations",
+            "title": "Operations Commander",
+            "status": "ACTIVE",
+            "access_binding": "BOUND",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json() == {
+        "id": created.json()["id"],
+        "name": "Andi Pratama",
+        "verification": "VERIFIED",
+        "access_binding": "NO_BINDING",
+        "status": "INACTIVE",
+    }
+    assert "password" not in created.json()
+    user_id = created.json()["id"]
+    stored = sqlite3.connect(os.environ["TRACKFORGE_DB"])
+    password_hash = stored.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()[0]
+    stored.close()
+    assert password_hash.startswith("pbkdf2_sha256$")
+    assert "temporary-password" not in password_hash
+
+    listed = client.get("/users", params={"q": "andi", "access_binding": "NO_BINDING"}).json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["email"] == "andi@trackforge.id"
+    assert listed["items"][0]["status"] == "INACTIVE"
+    assert client.post(
+        "/users/human",
+        json={
+            "name": "Andi Again",
+            "username": "andi.pratama",
+            "email": "other@trackforge.id",
+            "password": "temporary-password",
+        },
+    ).status_code == 409
+
+    custom = client.post(
+        "/roles",
+        json={
+            "name": "  Operations Planner  ",
+            "duty_category": "Operations Control",
+            "description": "Operational planning role.",
+            "privilege_narrative": "Provides required planning authority.",
+            "least_privilege_baseline": "Only planning-related capabilities.",
+        },
+    )
+    assert custom.status_code == 201, custom.text
+    assert custom.json()["name"] == "operations planner"
+    assert custom.json()["is_protected"] is False
+    history_id = next(item["id"] for item in catalog if item["code"] == "history")
+    read_id = next(item["id"] for item in catalog if item["code"] == "history.read")
+    granted = client.patch(
+        f"/roles/{custom.json()['id']}/permissions",
+        json={"permissionIds": [history_id]},
+    )
+    assert granted.status_code == 200, granted.text
+    assert {item["code"] for item in granted.json()["permissions"]} == {"history", "history.read"}
+    read_only = client.patch(
+        f"/roles/{custom.json()['id']}/permissions",
+        json={"permissionIds": [read_id]},
+    ).json()
+    assert {item["code"] for item in read_only["permissions"]} == {"history.read"}
+    assert client.patch(
+        f"/roles/{custom.json()['id']}/permissions",
+        json={"permissionIds": [999999]},
+    ).status_code == 400
+
+    bound = client.post(
+        "/user-roles",
+        json={"user_id": user_id, "role_id": custom.json()["id"], "description": "Planning desk"},
+    )
+    assert bound.status_code == 201, bound.text
+    assert bound.json()["status"] == "ACTIVE"
+    assert bound.json()["user_status"] == "ACTIVE"
+    assert bound.json()["access_binding"] == "BOUND"
+    assert client.post(
+        "/user-roles",
+        json={"user_id": user_id, "role_id": by_name["viewer"]["id"]},
+    ).status_code == 409
+    access = client.get(f"/users/{user_id}/permissions").json()
+    assert access["role"] == "operations planner"
+    assert access["permissions"] == ["history.read"]
+    assert client.get("/users/summary").json()["active_humans"] == 1
+
+    pending = client.patch(f"/users/{user_id}/human", json={"verification": "PENDING"})
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["status"] == "INACTIVE"
+    assert pending.json()["access_binding"] == "BOUND"
+    assert client.get("/users/summary").json()["pending_verification"] == 1
+    restored = client.patch(f"/users/{user_id}/human", json={"verification": "VERIFIED"})
+    assert restored.json()["status"] == "ACTIVE"
+
+    revoked = client.patch(f"/user-roles/{bound.json()['id']}/status", json={"status": "REVOKED"})
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["user_status"] == "INACTIVE"
+    assert revoked.json()["access_binding"] == "NO_BINDING"
+    assert client.get(f"/users/{user_id}/permissions").json()["permissions"] == []
+
+    rebound = client.post(
+        "/user-roles",
+        json={"user_id": user_id, "role_id": by_name["viewer"]["id"]},
+    )
+    assert rebound.status_code == 201, rebound.text
+    assert rebound.json()["id"] == bound.json()["id"]
+    assert rebound.json()["user_status"] == "ACTIVE"
+    viewer_access = client.get(f"/users/{user_id}/permissions").json()
+    assert viewer_access["role"] == "viewer"
+    assert "history.read" in viewer_access["permissions"]
+    assert "history" not in viewer_access["permissions"]
+
+    held = sqlite3.connect(os.environ["TRACKFORGE_DB"])
+    held.execute("UPDATE users SET status = 'SUSPENDED' WHERE id = ?", (user_id,))
+    held.commit()
+    held.close()
+    suspended = client.patch(f"/user-roles/{bound.json()['id']}/status", json={"status": "REVOKED"})
+    assert suspended.json()["user_status"] == "SUSPENDED"
+    assert client.delete(f"/roles/{custom.json()['id']}").status_code == 204
+    assert client.get(f"/roles/{custom.json()['id']}/detail").status_code == 404
+    assert client.get("/api/history/summary", params={"scope": "GROUP", "group_id": "Alpha"}).status_code == 200
+
+
+def test_login_checks_password_and_returns_active_access(client: TestClient):
+    import os
+    import sqlite3
+
+    from app.access import hash_password
+
+    created = client.post(
+        "/users/human",
+        json={
+            "name": "Andi Login",
+            "username": "andi.login",
+            "email": "andi.login@trackforge.id",
+            "password": "temporary-password",
+            "department": "Command Operations",
+        },
+    )
+    assert created.status_code == 201, created.text
+    user_id = created.json()["id"]
+    body = {"account": "andi.login", "password": "temporary-password"}
+    inactive = client.post("/users/login", json=body)
+    assert inactive.status_code == 403
+    assert inactive.json()["detail"] == "account is not active"
+    assert client.post("/users/login", json={"account": "andi.login", "password": "wrong-password"}).status_code == 401
+    assert client.post("/users/login", json={"account": "missing.user", "password": "temporary-password"}).status_code == 401
+
+    viewer = next(role for role in client.get("/roles").json()["items"] if role["name"] == "viewer")
+    bound = client.post("/user-roles", json={"user_id": user_id, "role_id": viewer["id"]})
+    assert bound.status_code == 201, bound.text
+
+    logged = client.post("/users/login", json={"account": "Andi.Login", "password": "temporary-password"})
+    assert logged.status_code == 200, logged.text
+    session = logged.json()
+    assert session["id"] == user_id
+    assert session["email"] == "andi.login@trackforge.id"
+    assert session["status"] == "ACTIVE"
+    assert session["access"]["role"] == "viewer"
+    assert session["access"]["user_id"] == user_id
+    assert "history.read" in session["access"]["permissions"]
+    assert "history" not in session["access"]["permissions"]
+    assert "password" not in session
+    assert "password_hash" not in session
+
+    by_email = client.post(
+        "/users/login",
+        json={"account": "ANDI.LOGIN@trackforge.id", "password": "temporary-password"},
+    )
+    assert by_email.status_code == 200, by_email.text
+    assert by_email.json()["access"]["permissions"] == session["access"]["permissions"]
+
+    pending = client.patch(f"/users/{user_id}/human", json={"verification": "PENDING"})
+    assert pending.json()["status"] == "INACTIVE"
+    unverified = client.post("/users/login", json=body)
+    assert unverified.status_code == 403
+    assert unverified.json()["detail"] == "account is not verified"
+
+    stored = sqlite3.connect(os.environ["TRACKFORGE_DB"])
+    stored.execute(
+        """
+        INSERT INTO users (
+            identity_type, name, username, email, password_hash, verification, status, created_at, updated_at
+        )
+        VALUES ('SERVICE', 'Gateway Bot', 'gateway.bot', 'gateway.bot@trackforge.id', ?, 'VERIFIED', 'ACTIVE', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z')
+        """,
+        (hash_password("temporary-password"),),
+    )
+    stored.commit()
+    stored.close()
+    service = client.post("/users/login", json={"account": "gateway.bot", "password": "temporary-password"})
+    assert service.status_code == 403
+    assert service.json()["detail"] == "account is not human"
+    assert "/users/login" in client.get("/openapi.json").json()["paths"]
