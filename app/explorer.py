@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from .database import get_connection, get_record, record_to_api
-from .records import canonical_time
+from .records import TIME_RANGES, canonical_time, time_range_start
 from .schemas import ExplorerPage, ExplorerRecord, ExplorerSummary, FilterOptions
 
 router = APIRouter(prefix="/api/explorer", tags=["Explorer"])
@@ -50,6 +50,13 @@ _OPTION_COLUMNS = (
 )
 
 
+def _range_start(value: str | None) -> str | None:
+    try:
+        return time_range_start(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _time_bound(value: str) -> str:
     try:
         return canonical_time(value)
@@ -74,6 +81,7 @@ def _filters(
     raw_format: str | None,
     from_time: str | None,
     to_time: str | None,
+    time_range: str | None,
 ) -> tuple[str, list]:
     conditions = ["is_sos = 0"]
     params: list = []
@@ -103,6 +111,10 @@ def _filters(
     if soldier_id is not None:
         conditions.append("soldier_id = ?")
         params.append(soldier_id)
+    range_start = _range_start(time_range)
+    if range_start:
+        conditions.append("event_time >= ?")
+        params.append(range_start)
     if from_time:
         conditions.append("event_time >= ?")
         params.append(_time_bound(from_time))
@@ -148,6 +160,7 @@ def _explorer_query(
     raw_format: Annotated[str | None, Query()] = None,
     from_time: Annotated[str | None, Query()] = None,
     to_time: Annotated[str | None, Query()] = None,
+    timeRange: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
@@ -168,6 +181,7 @@ def _explorer_query(
         raw_format,
         from_time,
         to_time,
+        timeRange,
     )
     return {"where": where, "params": params, "limit": limit, "offset": offset}
 
@@ -275,6 +289,7 @@ def get_filter_options():
                 """
             ).fetchall()
             options[key] = [row["value"] for row in rows]
+    options["time_ranges"] = list(TIME_RANGES)
     return options
 
 

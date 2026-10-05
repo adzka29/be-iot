@@ -315,6 +315,40 @@ def test_explorer_search_detail_options_and_csv(client: TestClient):
     assert sum(1 for line in text.splitlines() if ",UPLINK," in line) == 2
 
 
+def test_explorer_and_alerts_accept_all_time_and_30_day_ranges(client: TestClient):
+    flags = encode_flags(sos=True, strap=True)
+    posted = client.post(
+        "/api/ingest/telemetry",
+        json={
+            "soldier_id": 5151,
+            "seq": 1,
+            "timestamp": "2020-01-01T00:00:00Z",
+            "lat": -6.2,
+            "lon": 106.8,
+            "hr": 80,
+            "hrv": 40,
+            "spo2": 98,
+            "temp": 36,
+            "batt": 90,
+            "flags": flags,
+        },
+    )
+    assert posted.status_code == 200, posted.text
+    assert client.get("/api/explorer/filters/options").json()["time_ranges"] == ["all", "30d"]
+    assert client.get("/api/alerts/filters/options").json()["time_ranges"] == ["all", "30d"]
+
+    params = {"soldier_id": 5151}
+    assert client.get("/api/explorer", params={**params, "timeRange": "all"}).json()["total"] == 1
+    assert client.get("/api/explorer", params={**params, "timeRange": "alltime"}).json()["total"] == 1
+    assert client.get("/api/explorer", params={**params, "timeRange": "30d"}).json()["total"] == 0
+    assert client.get("/api/explorer/summary", params={**params, "timeRange": "30day"}).json()["total"] == 0
+    assert client.get("/api/explorer", params={"timeRange": "90d"}).status_code == 400
+
+    assert client.get("/api/alerts", params={**params, "timeRange": "all"}).json()["total"] >= 1
+    assert client.get("/api/alerts", params={**params, "timeRange": "30days"}).json()["total"] == 0
+    assert client.get("/api/alerts/summary", params={**params, "timeRange": "30d"}).json()["total"] == 0
+
+
 def test_sos_opens_alert_and_stays_in_explorer(client: TestClient):
     seeded = client.get("/api/alerts", params={"alert_type": "SOS", "soldier_id": 101}).json()
     assert seeded["total"] == 1

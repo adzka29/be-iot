@@ -8,7 +8,7 @@ from fastapi.responses import Response
 
 from .alert_rules import sync_no_contact
 from .database import get_connection, get_record, record_to_api
-from .records import canonical_time, utc_now
+from .records import TIME_RANGES, canonical_time, time_range_start, utc_now
 from .schemas import (
     AlertActorIn,
     AlertFilterOptions,
@@ -71,6 +71,13 @@ def alert_to_api(conn, row) -> dict:
     return item
 
 
+def _range_start(value: str | None) -> str | None:
+    try:
+        return time_range_start(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _time_bound(value: str) -> str:
     try:
         return canonical_time(value)
@@ -88,6 +95,7 @@ def _filters(
     gateway_id: str | None,
     from_time: str | None,
     to_time: str | None,
+    time_range: str | None,
 ) -> tuple[str, list]:
     conditions = ["1 = 1"]
     params: list = []
@@ -108,6 +116,10 @@ def _filters(
     if soldier_id is not None:
         conditions.append("soldier_id = ?")
         params.append(soldier_id)
+    range_start = _range_start(time_range)
+    if range_start:
+        conditions.append("event_time >= ?")
+        params.append(range_start)
     if from_time:
         conditions.append("event_time >= ?")
         params.append(_time_bound(from_time))
@@ -143,11 +155,12 @@ def _alert_query(
     gateway_id: Annotated[str | None, Query()] = None,
     from_time: Annotated[str | None, Query()] = None,
     to_time: Annotated[str | None, Query()] = None,
+    timeRange: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     where, params = _filters(
-        q, alert_type, severity, status, soldier_id, group_id, gateway_id, from_time, to_time
+        q, alert_type, severity, status, soldier_id, group_id, gateway_id, from_time, to_time, timeRange
     )
     return {"where": where, "params": params, "limit": limit, "offset": offset}
 
@@ -242,6 +255,7 @@ def alert_filter_options():
                 """
             ).fetchall()
             options[key] = [row["value"] for row in rows]
+    options["time_ranges"] = list(TIME_RANGES)
     return options
 
 

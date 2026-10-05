@@ -83,6 +83,7 @@ class FilterOptions(BaseModel):
     severity: list[str]
     record_origins: list[str]
     raw_formats: list[str]
+    time_ranges: list[str]
 
 
 class TelemetryIn(BaseModel):
@@ -256,6 +257,7 @@ class AlertFilterOptions(BaseModel):
     gateways: list[str]
     derived_from: list[str]
     record_origins: list[str]
+    time_ranges: list[str]
 
 
 class AlertActorIn(BaseModel):
@@ -750,6 +752,7 @@ class TicketFilterOptions(BaseModel):
     priorities: list[str]
     alert_types: list[str]
     groups: list[str]
+    time_ranges: list[str]
 
 
 class TicketTaskOut(BaseModel):

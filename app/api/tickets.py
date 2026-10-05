@@ -33,6 +33,7 @@ def list_tickets(
     group_id: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
@@ -45,6 +46,7 @@ def list_tickets(
         group_id=group_id,
         from_time=from_time,
         to_time=to_time,
+        time_range=timeRange,
         limit=limit,
         offset=offset,
     )

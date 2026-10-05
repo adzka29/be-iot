@@ -73,6 +73,10 @@ def test_ticket_is_created_only_from_an_alert(client: TestClient):
     options = client.get("/api/tickets/filters/options", headers=headers).json()
     assert "SOS" in options["alert_types"]
     assert "OPEN" in options["statuses"]
+    assert options["time_ranges"] == ["all", "30d"]
+    assert client.get("/api/tickets", headers=headers, params={"timeRange": "all"}).json()["total"] == 1
+    assert client.get("/api/tickets", headers=headers, params={"timeRange": "30d"}).json()["total"] == 1
+    assert client.get("/api/tickets", headers=headers, params={"timeRange": "90d"}).status_code == 400
 
     rejected = client.patch(f"/api/tickets/{ticket['id']}", headers=headers, json={"status": "RESOLVED"})
     assert rejected.status_code == 422

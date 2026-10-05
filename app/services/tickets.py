@@ -7,7 +7,7 @@ from ..access import display_name, effective_access, get_user, is_active_binding
 from ..audit import actor_for_user, actor_from_session, insert_audit, session_token
 from ..database import get_connection
 from ..db.tickets_repository import TicketRepository
-from ..records import canonical_time, utc_now
+from ..records import TIME_RANGES, canonical_time, time_range_start, utc_now
 
 STATUSES = ("OPEN", "IN_PROGRESS", "WAITING", "RESOLVED", "CLOSED")
 PRIORITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
@@ -72,6 +72,7 @@ class TicketService:
                 "priorities": list(PRIORITIES),
                 "alert_types": repo.visible_alert_types(where, params),
                 "groups": repo.visible_groups(where, params),
+                "time_ranges": list(TIME_RANGES),
             }
 
     def detail(self, request: Request, ticket_id: int) -> dict:
@@ -481,6 +482,10 @@ class TicketService:
             comparisons = " OR ".join("a.group_id = ? COLLATE NOCASE" for _ in groups)
             conditions.append(f"({comparisons})")
             params.extend(groups)
+        range_start = self._range_start(filters.get("time_range"))
+        if range_start:
+            conditions.append("t.created_at >= ?")
+            params.append(range_start)
         if filters.get("from_time"):
             conditions.append("t.created_at >= ?")
             params.append(self._time(filters["from_time"]))
@@ -518,6 +523,12 @@ class TicketService:
         try:
             return canonical_time(value)
         except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _range_start(self, value: str | None) -> str | None:
+        try:
+            return time_range_start(value)
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _visibility(self, user: CurrentUser) -> tuple[str, list]:

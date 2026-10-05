@@ -1,11 +1,34 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .frame import decode_flags, parse_hex
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+TIME_RANGES = ("all", "30d")
+_TIME_RANGE_ALIASES = {
+    "all": "all",
+    "alltime": "all",
+    "30d": "30d",
+    "30day": "30d",
+    "30days": "30d",
+}
+
+
+def time_range_start(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    key = "".join(char for char in value.strip().lower() if char.isalnum())
+    preset = _TIME_RANGE_ALIASES.get(key)
+    if preset is None:
+        raise ValueError("unknown timeRange")
+    if preset == "all":
+        return None
+    start = datetime.now(timezone.utc) - timedelta(days=30)
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def freshness_between(event_time: str, received_at: str) -> str:
