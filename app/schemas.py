@@ -681,3 +681,149 @@ class ProfileUser(BaseModel):
 
 class ProfileOut(BaseModel):
     user: ProfileUser
+
+
+TicketStatus = Literal["OPEN", "IN_PROGRESS", "WAITING", "RESOLVED", "CLOSED"]
+TicketPriority = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+TaskStatus = Literal["TODO", "IN_PROGRESS", "DONE"]
+
+
+class TicketPerson(BaseModel):
+    id: int
+    full_name: str | None
+    username: str | None
+    role: str | None
+
+
+class TicketSourceAlert(BaseModel):
+    id: int
+    alert_code: str
+    type: str
+    severity: str
+    status: str
+    soldier_id: int | None
+    group_id: str | None
+    event_time: str
+    position_source: str | None
+    latitude: float | None
+    longitude: float | None
+
+
+class TicketListItem(BaseModel):
+    id: int
+    ticket_code: str
+    source_alert_id: int
+    source_alert_code: str
+    alert_type: str
+    title: str
+    description: str
+    soldier_id: int | None
+    group_id: str | None
+    priority: TicketPriority
+    status: TicketStatus
+    created_at: str
+    updated_at: str
+    assignee: TicketPerson | None
+    created_by: TicketPerson
+
+
+class TicketPage(BaseModel):
+    items: list[TicketListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class TicketCount(BaseModel):
+    value: str
+    count: int
+
+
+class TicketSummary(BaseModel):
+    total: int
+    by_status: list[TicketCount]
+    by_priority: list[TicketCount]
+
+
+class TicketFilterOptions(BaseModel):
+    statuses: list[str]
+    priorities: list[str]
+    alert_types: list[str]
+    groups: list[str]
+
+
+class TicketTaskOut(BaseModel):
+    id: int
+    title: str
+    description: str | None
+    assignee: TicketPerson | None
+    priority: TicketPriority
+    status: TaskStatus
+    created_by: TicketPerson
+    created_at: str
+    updated_at: str
+    completed_at: str | None
+
+
+class TicketUpdateOut(BaseModel):
+    id: int
+    message: str
+    created_at: str
+    author: TicketPerson
+
+
+class TicketDetail(BaseModel):
+    id: int
+    ticket_code: str
+    status: TicketStatus
+    priority: TicketPriority
+    source_alert: TicketSourceAlert
+    created_by: TicketPerson
+    assignee: TicketPerson | None
+    collaborators: list[TicketPerson]
+    response_plan: str | None
+    tasks: list[TicketTaskOut]
+    updates: list[TicketUpdateOut]
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    resolved_at: str | None
+    closed_at: str | None
+
+
+class TicketPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    response_plan: str | None = None
+    priority: TicketPriority | None = None
+
+
+class TicketAssignIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: int
+
+
+class TicketCollaboratorIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: int
+
+
+class TicketTaskIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    description: str | None = None
+    assignee_id: int | None = None
+    priority: TicketPriority = "MEDIUM"
+
+
+class TicketTaskPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = None
+    description: str | None = None
+    assignee_id: int | None = None
+    priority: TicketPriority | None = None
+    status: TaskStatus | None = None
+
+
+class TicketMessageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str

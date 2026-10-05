@@ -357,6 +357,85 @@ def init_db() -> None:
             ON audit_logs (actor_id, timestamp)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_code TEXT NOT NULL UNIQUE,
+                source_alert_id INTEGER NOT NULL UNIQUE,
+                status TEXT NOT NULL
+                    CHECK (status IN ('OPEN', 'IN_PROGRESS', 'WAITING', 'RESOLVED', 'CLOSED')),
+                priority TEXT NOT NULL
+                    CHECK (priority IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')),
+                created_by INTEGER NOT NULL,
+                assignee_id INTEGER,
+                response_plan TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                resolved_at TEXT,
+                closed_at TEXT,
+                FOREIGN KEY (source_alert_id) REFERENCES alerts(id),
+                FOREIGN KEY (created_by) REFERENCES users(id),
+                FOREIGN KEY (assignee_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tickets_list
+            ON tickets (created_at, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_collaborators (
+                ticket_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                added_by INTEGER NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (ticket_id, user_id),
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (added_by) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                assignee_id INTEGER,
+                priority TEXT NOT NULL
+                    CHECK (priority IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')),
+                status TEXT NOT NULL DEFAULT 'TODO'
+                    CHECK (status IN ('TODO', 'IN_PROGRESS', 'DONE')),
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+                FOREIGN KEY (assignee_id) REFERENCES users(id),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_updates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+                FOREIGN KEY (author_id) REFERENCES users(id)
+            )
+            """
+        )
         from .access import seed_access
 
         seed_access(conn)
