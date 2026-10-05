@@ -49,10 +49,10 @@ class TicketService:
                 "offset": filters["offset"],
             }
 
-    def summary(self, request: Request) -> dict:
+    def summary(self, request: Request, time_range: str | None = None) -> dict:
         with get_connection() as conn:
             user = self._reader(conn, request)
-            where, params = self._visibility(user)
+            where, params = self._filters(user, time_range=time_range)
             repo = TicketRepository(conn)
             by_status = repo.grouped_counts(where, params, "status")
             by_priority = repo.grouped_counts(where, params, "priority")

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 from .database import get_connection, get_record
-from .records import canonical_time, parse_event_time
+from .records import TIME_RANGES, canonical_time, parse_event_time, time_range_start
 from .schemas import (
     HistoryCharts,
     HistoryFilterOptions,
@@ -48,6 +48,13 @@ _CSV_COLUMNS = (
 )
 
 
+def _range_start(value: str | None) -> str | None:
+    try:
+        return time_range_start(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _time_bound(value: str) -> str:
     try:
         return canonical_time(value)
@@ -84,6 +91,7 @@ def _where(
     position_source: list[str] | None,
     from_time: str | None,
     to_time: str | None,
+    time_range: str | None = None,
 ) -> tuple[str, list]:
     clause, params = _scope_clause(scope, soldier_id, group_id)
     conditions = ["is_sos = 0", clause]
@@ -97,6 +105,10 @@ def _where(
         marks = ", ".join("?" for _ in sources)
         conditions.append(f"position_source IN ({marks})")
         params.extend(sources)
+    range_start = _range_start(time_range)
+    if range_start:
+        conditions.append("event_time >= ?")
+        params.append(range_start)
     if from_time:
         conditions.append("event_time >= ?")
         params.append(_time_bound(from_time))
@@ -277,8 +289,11 @@ def _query_rows(
     position_source: list[str] | None,
     from_time: str | None,
     to_time: str | None,
+    time_range: str | None = None,
 ):
-    where, params = _where(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    where, params = _where(
+        scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, time_range
+    )
     return _load(where, params)
 
 
@@ -291,10 +306,11 @@ def list_history(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     rows = sorted(rows, key=lambda row: (row["event_time"], row["id"]), reverse=True)
     page = rows[offset : offset + limit]
     return {
@@ -313,14 +329,16 @@ def history_filter_options(
     group_id: str | None = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, None, None, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, None, None, from_time, to_time, timeRange)
     return {
         "data_types": sorted({_history_type(row["category"]) for row in rows}),
         "position_sources": sorted({row["position_source"] for row in rows if row["position_source"]}),
         "gateways": sorted({row["gateway_id"] for row in rows if row["gateway_id"]}),
         "soldiers": sorted({row["soldier_id"] for row in rows if row["soldier_id"] is not None}),
         "groups": sorted({row["group_id"] for row in rows if row["group_id"]}),
+        "time_ranges": list(TIME_RANGES),
     }
 
 
@@ -333,8 +351,9 @@ def history_summary(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     samples = _deduped(rows)
     return {
         "cards": {
@@ -356,8 +375,9 @@ def history_statistics(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     samples = [sample for sample in _deduped(rows) if sample["lat"] is not None and sample["lon"] is not None]
     type_counts: dict[str, int] = {}
     for row in rows:
@@ -390,8 +410,9 @@ def history_charts(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     buckets: dict[str, dict] = {}
     for sample in _deduped(rows):
         stamp = sample["row"]["event_time"]
@@ -423,8 +444,9 @@ def history_track(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     points = []
     for sample in _deduped(rows):
         if sample["lat"] is None or sample["lon"] is None:
@@ -454,8 +476,9 @@ def export_history(
     position_source: Annotated[list[str] | None, Query()] = None,
     from_time: str | None = None,
     to_time: str | None = None,
+    timeRange: str | None = None,
 ):
-    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time)
+    rows = _query_rows(scope, soldier_id, group_id, history_data_type, position_source, from_time, to_time, timeRange)
     rows = sorted(rows, key=lambda row: (row["event_time"], row["id"]), reverse=True)
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS)

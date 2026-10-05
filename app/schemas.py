@@ -377,6 +377,7 @@ class HistoryFilterOptions(BaseModel):
     gateways: list[str]
     soldiers: list[int]
     groups: list[str]
+    time_ranges: list[str]
 
 
 class SystemIn(BaseModel):

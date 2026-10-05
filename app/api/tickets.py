@@ -53,8 +53,8 @@ def list_tickets(
 
 
 @router.get("/summary", response_model=TicketSummary)
-def ticket_summary(request: Request):
-    return service.summary(request)
+def ticket_summary(request: Request, timeRange: str | None = None):
+    return service.summary(request, timeRange)
 
 
 @router.get("/filters/options", response_model=TicketFilterOptions)

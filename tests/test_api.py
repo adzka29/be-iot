@@ -587,6 +587,9 @@ def test_history_reads_explorer_without_double_counting(client: TestClient):
     options = client.get("/api/history/filters/options", params=params).json()
     assert "MESH_FRAME" in options["data_types"]
     assert "GNSS" in options["position_sources"]
+    assert options["time_ranges"] == ["all", "30d"]
+    assert client.get("/api/history/summary", params={**params, "timeRange": "all"}).json()["cards"]["total_records"] == 60
+    assert client.get("/api/history", params={"scope": "GROUP", "group_id": "Alpha", "timeRange": "90d"}).status_code == 400
 
     exported = client.get("/api/history/export.csv", params={**params, "history_data_type": "UPLINK"})
     assert exported.status_code == 200
