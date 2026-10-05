@@ -115,7 +115,8 @@ def list_users(
         total = conn.execute(f"SELECT COUNT(*) AS n FROM users WHERE {where}", params).fetchone()["n"]
         rows = conn.execute(
             f"""
-            SELECT * FROM users
+            SELECT id, identity_type, name, username, email, department, verification, status
+            FROM users
             WHERE {where}
             ORDER BY id ASC
             LIMIT ? OFFSET ?

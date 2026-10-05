@@ -235,6 +235,11 @@ def init_db() -> None:
             )
             """
         )
+        user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "profile_image" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN profile_image BLOB")
+        if "profile_image_mime" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN profile_image_mime TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS roles (

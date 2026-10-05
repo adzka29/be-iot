@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from pydantic import BaseModel
-
 from .alerts import router as alerts_router
 from .audit import router as audit_router
 from .bindings import router as bindings_router
@@ -11,6 +10,7 @@ from .explorer import router as explorer_router
 from .geofences import router as geofences_router
 from .history import router as history_router
 from .ingest import router as ingest_router
+from .profile import auth_router, profile_router
 from .roles import catalog_router, router as roles_router
 from .users import router as users_router
 
@@ -46,6 +46,8 @@ app.include_router(geofences_router)
 app.include_router(alerts_router)
 app.include_router(history_router)
 app.include_router(users_router)
+app.include_router(auth_router)
+app.include_router(profile_router)
 app.include_router(roles_router)
 app.include_router(catalog_router)
 app.include_router(bindings_router)

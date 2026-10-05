@@ -654,3 +654,30 @@ class AuditDetail(BaseModel):
     userAgent: str | None
     sessionId: str | None
     metadata: dict[str, Any] | None
+
+
+class ProfileRole(BaseModel):
+    id: int
+    name: str
+
+
+class ProfileUser(BaseModel):
+    id: int
+    identityType: IdentityType
+    fullName: str
+    username: str | None
+    email: str | None
+    profileImageUrl: str | None
+    department: str | None
+    status: UserStatus
+    verification: Verification
+    accessBinding: AccessBinding
+    role: ProfileRole | None
+    accountType: str
+    lastLoginAt: str | None
+    loginMethod: str
+    memberSince: str
+
+
+class ProfileOut(BaseModel):
+    user: ProfileUser
