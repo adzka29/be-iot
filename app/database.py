@@ -436,6 +436,57 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'ACTIVE'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL
+                    CHECK (status IN ('PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED')),
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                deleted_at TEXT,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_groups (
+                operation_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                PRIMARY KEY (operation_id, group_id),
+                FOREIGN KEY (operation_id) REFERENCES operations(id),
+                FOREIGN KEY (group_id) REFERENCES groups(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_geofences (
+                operation_id INTEGER NOT NULL,
+                geofence_id INTEGER NOT NULL,
+                PRIMARY KEY (operation_id, geofence_id),
+                FOREIGN KEY (operation_id) REFERENCES operations(id),
+                FOREIGN KEY (geofence_id) REFERENCES geofences(id)
+            )
+            """
+        )
         from .access import seed_access
 
         seed_access(conn)

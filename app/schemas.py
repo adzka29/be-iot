@@ -831,3 +831,201 @@ class TicketTaskPatch(BaseModel):
 class TicketMessageIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str
+
+
+OperationStatus = Literal["PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"]
+
+
+class OperationListItem(BaseModel):
+    id: int
+    operation_code: str
+    name: str
+    description: str | None
+    status: OperationStatus
+    start_at: str
+    end_at: str
+    group_count: int
+    personnel_count: int
+    geofence_count: int
+    created_at: str
+
+
+class OperationPage(BaseModel):
+    items: list[OperationListItem]
+    page: int
+    limit: int
+    total: int
+
+
+class OperationSummary(BaseModel):
+    total: int
+    planning: int
+    active: int
+    on_hold: int
+    completed: int
+    cancelled: int
+
+
+class OperationGroupOption(BaseModel):
+    id: int
+    name: str
+
+
+class OperationFilterOptions(BaseModel):
+    statuses: list[str]
+    groups: list[OperationGroupOption]
+
+
+class OperationGroupChoice(BaseModel):
+    id: int
+    name: str
+    personnel_count: int
+    commander_name: str | None
+
+
+class OperationGroupChoices(BaseModel):
+    items: list[OperationGroupChoice]
+
+
+class OperationActor(BaseModel):
+    id: int
+    name: str
+
+
+class OperationGroupRef(BaseModel):
+    id: int
+    name: str
+    personnel_count: int
+
+
+class OperationGeofenceRef(BaseModel):
+    id: int
+    name: str
+
+
+class OperationCounts(BaseModel):
+    group_count: int
+    personnel_count: int
+    geofence_count: int
+
+
+class OperationDetail(BaseModel):
+    id: int
+    operation_code: str
+    name: str
+    description: str | None
+    status: OperationStatus
+    start_at: str
+    end_at: str
+    groups: list[OperationGroupRef]
+    geofences: list[OperationGeofenceRef]
+    summary: OperationCounts
+    created_by: OperationActor
+    created_at: str
+
+
+class OperationWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    description: str | None = None
+    start_at: str
+    end_at: str
+    group_ids: list[int] = Field(default_factory=list)
+    geofence_ids: list[int] = Field(default_factory=list)
+
+
+class OperationPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    description: str | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    group_ids: list[int] | None = None
+    geofence_ids: list[int] | None = None
+
+
+class OperationGroupIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    group_id: int
+
+
+class OperationGeofenceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    geofence_id: int
+
+
+class OperationCommander(BaseModel):
+    id: int
+    name: str
+
+
+class OperationGroupItem(BaseModel):
+    id: int
+    name: str
+    commander: OperationCommander | None
+    personnel_count: int
+    status: str
+
+
+class OperationGroupList(BaseModel):
+    items: list[OperationGroupItem]
+
+
+class OperationPersonnelItem(BaseModel):
+    soldier_id: int
+    group_id: int
+    group_name: str
+
+
+class OperationPersonnelList(BaseModel):
+    items: list[OperationPersonnelItem]
+
+
+class OperationMapPosition(BaseModel):
+    soldier_id: int
+    group_id: int
+    group_name: str
+    latitude: float | None
+    longitude: float | None
+    event_time: str | None
+
+
+class OperationMapGeofence(BaseModel):
+    id: int
+    name: str
+    polygon: list[list[float]]
+
+
+class OperationMap(BaseModel):
+    operation: dict[str, int | str]
+    groups: list[OperationGroupRef]
+    personnel: list[OperationPersonnelItem]
+    geofences: list[OperationMapGeofence]
+    positions: list[OperationMapPosition]
+
+
+class OperationAlertItem(BaseModel):
+    id: int
+    type: str
+    severity: str
+    soldier_id: int | None
+    group_id: int | None
+    status: str
+    event_time: str
+
+
+class OperationAlertList(BaseModel):
+    items: list[OperationAlertItem]
+
+
+class OperationTicketItem(BaseModel):
+    id: int
+    ticket_code: str
+    status: str
+    priority: str
+    source_alert_id: int
+    alert_type: str
+
+
+class OperationTicketList(BaseModel):
+    items: list[OperationTicketItem]

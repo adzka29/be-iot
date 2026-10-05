@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 from .alerts import router as alerts_router
+from .api.operations import router as operations_router
 from .api.tickets import alert_ticket_router, router as tickets_router
 from .audit import router as audit_router
 from .bindings import router as bindings_router
@@ -48,6 +49,7 @@ app.include_router(alerts_router)
 app.include_router(alert_ticket_router)
 app.include_router(tickets_router)
 app.include_router(history_router)
+app.include_router(operations_router)
 app.include_router(users_router)
 app.include_router(auth_router)
 app.include_router(profile_router)
