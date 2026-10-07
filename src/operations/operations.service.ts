@@ -856,6 +856,8 @@ export class OperationsService {
     return {
       id: row.id,
       name: row.name,
+      kind: row.kind ?? null,
+      color: row.color ?? null,
       polygon: JSON.parse(row.polygon_json),
     };
   }
