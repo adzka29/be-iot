@@ -858,8 +858,43 @@ export class OperationsService {
       name: row.name,
       kind: row.kind ?? null,
       color: row.color ?? null,
-      polygon: JSON.parse(row.polygon_json),
+      polygon: this.parseStoredPolygon(row.polygon_json),
     };
+  }
+
+  private parseStoredPolygon(raw: unknown): number[][] {
+    let value: any = raw;
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        return [];
+      }
+    }
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      if (value.type === 'Polygon' && Array.isArray(value.coordinates)) {
+        value = value.coordinates[0];
+      } else if (Array.isArray(value.polygon)) {
+        value = value.polygon;
+      }
+    }
+    if (!Array.isArray(value)) return [];
+    const ring: number[][] = [];
+    for (const point of value) {
+      if (!Array.isArray(point) || point.length < 2) continue;
+      const a = Number(point[0]);
+      const b = Number(point[1]);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      ring.push([a, b]);
+    }
+    if (
+      ring.length > 3 &&
+      ring[0][0] === ring[ring.length - 1][0] &&
+      ring[0][1] === ring[ring.length - 1][1]
+    ) {
+      ring.pop();
+    }
+    return ring.length >= 3 ? ring : [];
   }
 
   private audit(

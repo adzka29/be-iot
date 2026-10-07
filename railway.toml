@@ -3,6 +3,7 @@
 # App auto-uses $RAILWAY_VOLUME_MOUNT_PATH/trackforge.db when TRACKFORGE_DB is unset.
 #
 # Recommended Variables (Dashboard → Variables):
+#   PORT=8080   (must match Settings → Networking → Public port)
 #   TRACKFORGE_DB=/data/trackforge.db
 #   TRACKFORGE_SEED=1
 #   TRACKFORGE_SEED_HOURS=24
