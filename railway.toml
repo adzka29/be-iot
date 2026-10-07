@@ -1,6 +1,13 @@
 # Railway deploy — attach a Volume and set mount path to /data
 # (Dashboard → Service → Settings → Volumes).
 # App auto-uses $RAILWAY_VOLUME_MOUNT_PATH/trackforge.db when TRACKFORGE_DB is unset.
+#
+# Recommended Variables (Dashboard → Variables):
+#   TRACKFORGE_DB=/data/trackforge.db
+#   TRACKFORGE_SEED=1
+#   TRACKFORGE_SEED_HOURS=24
+#   TRACKFORGE_LIVE_SIM=1
+#   (do NOT set TRACKFORGE_SEED_BASE — lets seed end at wall-clock now)
 
 [build]
 builder = "RAILPACK"

@@ -29,12 +29,24 @@ export class LiveSimulatorService implements OnModuleInit, OnModuleDestroy {
     if (process.env.TRACKFORGE_LIVE_SIM === '0') return;
 
     this.tickIndex = this.resolveStartTick();
-    this.lastEmittedBucket = this.wallBucket(Date.now());
+    const now = Date.now();
+    const lastSimMs = this.maxSimulatedEventMs();
+    const staleMs = lastSimMs > 0 ? now - lastSimMs : 0;
+
+    // Allow an immediate tick (same 30s bucket would otherwise no-op).
+    this.lastEmittedBucket = this.wallBucket(now) - SEED_INTERVAL_MS;
+
     this.log.log(
-      `Live simulator on — tick=${this.tickIndex}, every ${SEED_INTERVAL_MS / 1000}s (wall clock)`,
+      `Live simulator on — tick=${this.tickIndex}, every ${SEED_INTERVAL_MS / 1000}s (wall clock)` +
+        (staleMs > SEED_INTERVAL_MS * 2
+          ? `, stale=${Math.round(staleMs / 60000)}m → catch-up`
+          : ''),
     );
 
-    // Fire soon so UI is not stuck on stale seed-end until first interval elapses.
+    if (staleMs > SEED_INTERVAL_MS * 2) {
+      this.catchUp(now);
+    }
+
     setTimeout(() => this.tick(), 1_000);
     this.timer = setInterval(() => this.tick(), SEED_INTERVAL_MS);
     this.retentionTimer = setInterval(
@@ -54,6 +66,43 @@ export class LiveSimulatorService implements OnModuleInit, OnModuleDestroy {
     return ms - (ms % SEED_INTERVAL_MS);
   }
 
+  private maxSimulatedEventMs(): number {
+    const row = this.db.connection
+      .prepare(
+        `
+        SELECT MAX(event_time) AS t
+        FROM explorer_records
+        WHERE category = 'TELEMETRY' AND record_origin = 'SIMULATED'
+        `,
+      )
+      .get() as { t: string | null };
+    if (!row?.t) return 0;
+    const ms = Date.parse(row.t);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  /** Emit a short burst of recent wall-clock ticks so dashboards are not stuck on old seed. */
+  private catchUp(now: number) {
+    const bursts = Math.min(
+      20,
+      Math.max(2, Number(process.env.TRACKFORGE_LIVE_CATCHUP_TICKS || 10)),
+    );
+    let bucket = this.wallBucket(now) - bursts * SEED_INTERVAL_MS;
+    for (let i = 0; i < bursts; i += 1) {
+      bucket += SEED_INTERVAL_MS;
+      if (bucket > now) break;
+      try {
+        generateLiveTick(this.db.connection, this.tickIndex, bucket);
+        this.tickIndex += 1;
+        this.lastEmittedBucket = bucket;
+      } catch (err) {
+        this.log.warn(`Live simulator catch-up failed: ${String(err)}`);
+        break;
+      }
+    }
+    this.log.log(`Live simulator catch-up wrote ${bursts} tick(s)`);
+  }
+
   private resolveStartTick(): number {
     const row = this.db.connection
       .prepare(
@@ -65,7 +114,6 @@ export class LiveSimulatorService implements OnModuleInit, OnModuleDestroy {
       )
       .get() as { t: string | null };
     if (!row?.t) return seedTickCount();
-    // Continue seq from how many simulated samples exist (approx).
     const n = (
       this.db.connection
         .prepare(
