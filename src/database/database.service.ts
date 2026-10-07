@@ -1,4 +1,9 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -65,6 +70,7 @@ const PUBLIC_FIELDS = [
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
+  private readonly log = new Logger(DatabaseService.name);
   private db!: Database.Database;
 
   onModuleInit() {
@@ -81,8 +87,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   dbPath(): string {
-    const override = process.env.TRACKFORGE_DB;
+    const override = process.env.TRACKFORGE_DB?.trim();
     if (override) return override;
+    // Railway volume mount (Settings → Volumes). Persist DB across deploys.
+    const railwayVolume = process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
+    if (railwayVolume) {
+      return path.join(railwayVolume, 'trackforge.db');
+    }
     return path.join(process.cwd(), 'data', 'trackforge.db');
   }
 
@@ -98,6 +109,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
     this.db = new Database(file, { timeout: 5000 });
     this.db.pragma('foreign_keys = ON');
+    this.log.log(`SQLite path: ${file}`);
   }
 
   close() {

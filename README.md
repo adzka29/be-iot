@@ -142,13 +142,39 @@ Client / Gateway
 | Variabel | Default | Fungsi |
 |----------|---------|--------|
 | `PORT` | `8000` | HTTP listen port |
-| `TRACKFORGE_DB` | `<cwd>/data/trackforge.db` | Path file SQLite |
+| `TRACKFORGE_DB` | lihat di bawah | Path file SQLite |
 | `TRACKFORGE_SEED` | on (kecuali `"0"`) | Unified telemetry seed + access |
 | `TRACKFORGE_SEED_HOURS` | `24` | Durasi seed (24 → 43.200 TELEMETRY sebelum gap) |
 | `TRACKFORGE_SEED_BASE` | *(now − duration)* | Awal window seed; kosong = berakhir di jam wall-clock sekarang |
 | `TRACKFORGE_LIVE_SIM` | on (kecuali `"0"`) | Lanjut generate tiap **30 detik** (30 record/menit) dengan jam aktual |
 
+Urutan resolusi path DB:
+
+1. `TRACKFORGE_DB` jika di-set  
+2. else `$RAILWAY_VOLUME_MOUNT_PATH/trackforge.db` (Volume Railway)  
+3. else `<cwd>/data/trackforge.db` (local)
+
 Contoh test: `TRACKFORGE_SEED_BASE=2026-10-04T08:00:00Z`, `TRACKFORGE_SEED_HOURS=0.75`, `TRACKFORGE_LIVE_SIM=0`.
+
+### Deploy Railway (supaya data tidak hilang tiap deploy)
+
+Tanpa Volume, SQLite di container **terhapus** setiap redeploy → seed ulang → data beda dengan local.
+
+1. Railway → Service → **Settings → Volumes** → Add Volume  
+   - Mount path: `/data`  
+2. Variables (recommended):
+
+| Variable | Value |
+|----------|--------|
+| `TRACKFORGE_DB` | `/data/trackforge.db` |
+| `TRACKFORGE_SEED_HOURS` | `24` |
+| `TRACKFORGE_LIVE_SIM` | `1` (atau `0` jika ingin freeze setelah seed) |
+| `TRACKFORGE_SEED_BASE` | *(opsional)* ISO fixed, mis. `2026-10-04T08:00:00Z` |
+
+3. Redeploy. Cek log: `[DatabaseService] SQLite path: /data/trackforge.db`  
+4. Seed hanya jalan **sekali** saat DB volume masih kosong. Deploy berikutnya memakai data yang sama (operations/groups yang dibuat di Railway tetap ada).
+
+Lihat juga `.env.example` dan `railway.toml`.
 
 ---
 

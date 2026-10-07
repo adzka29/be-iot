@@ -1179,4 +1179,15 @@ npm run build
 PORT=8000 TRACKFORGE_DB=/var/data/trackforge.db npm run start:prod
 ```
 
-Deploy Railpack: `node dist/main.js` (`railpack.json`).
+Deploy Railpack: `node dist/main.js` (`railpack.json` / `railway.toml`).
+
+### Railway — persist SQLite
+
+| Masalah | Penyebab | Perbaikan |
+|---------|----------|-----------|
+| Data beda tiap deploy | Disk container ephemeral | **Volume** mount `/data` + `TRACKFORGE_DB=/data/trackforge.db` |
+| Timestamp seed beda | `SEED_BASE` wall-clock | Set `TRACKFORGE_SEED_BASE` fixed (opsional) |
+| Operations/groups hilang | DB di-seed ulang | Volume + jangan hapus volume |
+
+Path DB: `TRACKFORGE_DB` → else `$RAILWAY_VOLUME_MOUNT_PATH/trackforge.db` → else `./data/trackforge.db`.  
+Seed hanya jika `explorer_records` kosong.
