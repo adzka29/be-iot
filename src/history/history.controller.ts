@@ -5,13 +5,21 @@ import {
   Param,
   ParseIntPipe,
   Query,
+  Req,
   Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { DatabaseService } from '../database/database.service';
+import {
+  effectiveAccess,
+  getUser,
+  hasPermission,
+} from '../database/access';
+import { actorFromSession, sessionToken } from '../common/audit';
 import { TIME_RANGES, canonicalTime, parseEventTime, timeRangeStart } from '../common/records';
 import { bind } from '../common/sql';
 
+/** Operational History domain = TELEMETRY only. Transport types remain optional debug overrides. */
 const CATEGORY_BY_TYPE: Record<string, string> = {
   TELEMETRY: 'TELEMETRY',
   MESH_FRAME: 'MESH',
@@ -32,6 +40,21 @@ const CSV_COLUMNS = [
 @Controller('api/history')
 export class HistoryController {
   constructor(private readonly db: DatabaseService) {}
+
+  /** Session + history.read (docs contract). */
+  private requireHistory(request: Request) {
+    const conn = this.db.connection;
+    const actor = actorFromSession(conn, sessionToken(request));
+    if (actor == null) throw new HttpException('authentication required', 401);
+    const user = getUser(conn, actor.id!);
+    if (user == null) throw new HttpException('authentication required', 401);
+    const access = effectiveAccess(conn, user.id);
+    const granted = new Set(access?.permissions ?? []);
+    if (!hasPermission(granted, 'history', 'read')) {
+      throw new HttpException('permission denied', 403);
+    }
+    return user;
+  }
 
   private rangeStart(value?: string | null) {
     try {
@@ -63,6 +86,10 @@ export class HistoryController {
     return values.map((v) => CATEGORY_BY_TYPE[v]);
   }
 
+  /**
+   * scope=GROUP&group_id=Alpha — `group_id` matches explorer_records.group_id,
+   * which stores the enriched **group name string** (not numeric groups.id).
+   */
   private scopeClause(scope: string, soldierId?: number | null, groupId?: string | null) {
     if (scope === 'SOLDIER') {
       if (soldierId == null) {
@@ -82,13 +109,14 @@ export class HistoryController {
   private where(q: any) {
     const soldierId = q.soldier_id != null && q.soldier_id !== '' ? Number(q.soldier_id) : null;
     const { clause, params } = this.scopeClause(q.scope, soldierId, q.group_id);
-    // is_sos is legacy — not a History business filter. SOS telemetry stays visible.
     const conditions = [clause];
-    const categories = this.categories(this.asList(q.history_data_type));
-    if (categories) {
-      conditions.push(`category IN (${categories.map(() => '?').join(', ')})`);
-      params.push(...categories);
+    // Default operational domain = TELEMETRY (not UPLINK/SATELLITE_BURST transport).
+    let categories = this.categories(this.asList(q.history_data_type));
+    if (!categories?.length) {
+      categories = ['TELEMETRY'];
     }
+    conditions.push(`category IN (${categories.map(() => '?').join(', ')})`);
+    params.push(...categories);
     const sources = (this.asList(q.position_source) || []).filter(Boolean);
     if (sources.length) {
       conditions.push(`position_source IN (${sources.map(() => '?').join(', ')})`);
@@ -134,7 +162,6 @@ export class HistoryController {
       return null;
     }
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-    // Python only accepts int/float for _number, not string
     return null;
   }
 
@@ -153,19 +180,14 @@ export class HistoryController {
     };
   }
 
+  /** Deduplicate TELEMETRY only (operational History track/charts). */
   private deduped(rows: any[]) {
     const chosen = new Map<string, any>();
     for (const row of rows) {
-      if (row.category !== 'TELEMETRY' && row.category !== 'MESH') continue;
+      if (row.category !== 'TELEMETRY') continue;
       const sample = this.sample(row);
       const key = `${row.soldier_id}|${row.event_time}|${sample.seq}`;
-      const current = chosen.get(key);
-      if (
-        current == null ||
-        (row.category === 'TELEMETRY' && current.row.category !== 'TELEMETRY')
-      ) {
-        chosen.set(key, sample);
-      }
+      if (!chosen.has(key)) chosen.set(key, sample);
     }
     return Array.from(chosen.values());
   }
@@ -228,6 +250,7 @@ export class HistoryController {
       source_id: row.id,
       event_time: row.event_time,
       received_at: row.received_at,
+      // History maps category → data_type label (TELEMETRY), not DB data_type SOLDIER_TELEMETRY.
       data_type: this.historyType(row.category),
       category: row.category,
       entity_type: row.entity_type,
@@ -245,19 +268,8 @@ export class HistoryController {
     const sample = this.sample(row);
     const payload = sample.payload;
     const data = sample.data;
-    const flags =
-      payload.flags && typeof payload.flags === 'object' ? payload.flags : {};
-    const positionSource = row.position_source || flags.position_source;
-    const communication: Record<string, unknown> = {
-      transport: row.transport,
-      gateway_id: row.gateway_id,
-      hop_count: data.hop_count,
-      rssi: data.rssi,
-      snr: data.snr,
-      ttl: data.ttl,
-      delivery_mode: data.delivery_mode,
-      delivery_status: data.delivery_status,
-    };
+    const flags = flagsObject(payload.flags) ? payload.flags : {};
+    const positionSource = row.position_source || (flags as any).position_source;
     const item: any = this.item(row);
     item.position_source = positionSource;
     item.transport = row.transport;
@@ -274,9 +286,14 @@ export class HistoryController {
         temp: payload.temp,
       },
       device: { batt: payload.batt, flags },
-      communication: Object.fromEntries(
-        Object.entries(communication).filter(([, v]) => v != null),
-      ),
+      // 21-byte soldier packet has no hop/rssi/snr — do not fake Communication.
+      packet_reference: {
+        transport: row.transport ?? null,
+        gateway_id: row.gateway_id ?? null,
+        seq: payload.seq ?? null,
+        burst_id: data.burst_id ?? null,
+        burst_index: data.burst_index ?? null,
+      },
       timing: { event_time: row.event_time, received_at: row.received_at },
       raw_data: {
         raw_hex: row.raw_hex,
@@ -288,7 +305,8 @@ export class HistoryController {
   }
 
   @Get()
-  list(@Query() q: any) {
+  list(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
     let rows = this.queryRows(q);
     rows = [...rows].sort((a, b) =>
       a.event_time === b.event_time
@@ -310,22 +328,30 @@ export class HistoryController {
   }
 
   @Get('filters/options')
-  filterOptions(@Query() q: any) {
-    const rows = this.queryRows({ ...q, history_data_type: undefined, position_source: undefined });
+  filterOptions(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
+    // Always TELEMETRY domain for filter options (ignore transport overrides).
+    const rows = this.queryRows({
+      ...q,
+      history_data_type: 'TELEMETRY',
+      position_source: undefined,
+    });
     return {
-      data_types: [...new Set(rows.map((r) => this.historyType(r.category)))].sort(),
+      // Operational History only exposes TELEMETRY — not UPLINK/MESH/BEACON.
+      data_types: ['TELEMETRY'],
       position_sources: [...new Set(rows.map((r) => r.position_source).filter(Boolean))].sort(),
-      gateways: [...new Set(rows.map((r) => r.gateway_id).filter(Boolean))].sort(),
       soldiers: [...new Set(rows.map((r) => r.soldier_id).filter((v) => v != null))].sort(
         (a, b) => a - b,
       ),
+      // Group names present on telemetry only after personnel enrichment.
       groups: [...new Set(rows.map((r) => r.group_id).filter(Boolean))].sort(),
       time_ranges: [...TIME_RANGES],
     };
   }
 
   @Get('summary')
-  summary(@Query() q: any) {
+  summary(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
     const rows = this.queryRows(q);
     const samples = this.deduped(rows);
     return {
@@ -338,40 +364,45 @@ export class HistoryController {
         battery_avg_percent: this.average(
           samples.filter((s) => s.batt != null).map((s) => s.batt),
         ),
+        // TELEMETRY row count only (transport audit excluded by default filter).
         total_records: rows.length,
+        telemetry_count: rows.length,
       },
     };
   }
 
   @Get('statistics')
-  statistics(@Query() q: any) {
+  statistics(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
     const rows = this.queryRows(q);
     const samples = this.deduped(rows).filter((s) => s.lat != null && s.lon != null);
-    const typeCounts: Record<string, number> = {};
-    for (const row of rows) {
-      const name = this.historyType(row.category);
-      typeCounts[name] = (typeCounts[name] || 0) + 1;
-    }
     const sourceCounts: Record<string, number> = {};
     for (const sample of samples) {
       const source = sample.row.position_source;
       if (source) sourceCounts[source] = (sourceCounts[source] || 0) + 1;
     }
+    const bySoldier = new Map<number, number>();
+    for (const row of rows) {
+      if (row.soldier_id == null) continue;
+      bySoldier.set(row.soldier_id, (bySoldier.get(row.soldier_id) || 0) + 1);
+    }
     return {
+      telemetry_count: rows.length,
       total_records: rows.length,
       position_points: samples.length,
-      soldiers: new Set(rows.map((r) => r.soldier_id).filter((v) => v != null)).size,
-      by_data_type: Object.keys(typeCounts)
-        .sort()
-        .map((name) => ({ name, count: typeCounts[name] })),
+      soldiers: bySoldier.size,
       by_position_source: Object.keys(sourceCounts)
         .sort()
         .map((name) => ({ name, count: sourceCounts[name] })),
+      by_soldier: [...bySoldier.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([soldier_id, count]) => ({ soldier_id, count })),
     };
   }
 
   @Get('charts')
-  charts(@Query() q: any) {
+  charts(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
     const rows = this.queryRows(q);
     const buckets = new Map<string, any>();
     for (const sample of this.deduped(rows)) {
@@ -398,8 +429,10 @@ export class HistoryController {
   }
 
   @Get('track')
-  track(@Query() q: any) {
-    const rows = this.queryRows(q);
+  track(@Req() request: Request, @Query() q: any) {
+    this.requireHistory(request);
+    // Force TELEMETRY for soldier movement track (ignore transport overrides).
+    const rows = this.queryRows({ ...q, history_data_type: 'TELEMETRY' });
     const points: any[] = [];
     for (const sample of this.deduped(rows)) {
       if (sample.lat == null || sample.lon == null) continue;
@@ -425,7 +458,8 @@ export class HistoryController {
   }
 
   @Get('export.csv')
-  exportCsv(@Query() q: any, @Res() res: Response) {
+  exportCsv(@Req() request: Request, @Query() q: any, @Res() res: Response) {
+    this.requireHistory(request);
     let rows = this.queryRows(q);
     rows = [...rows].sort((a, b) =>
       a.event_time === b.event_time
@@ -450,11 +484,19 @@ export class HistoryController {
   }
 
   @Get('point/:recordId')
-  point(@Param('recordId', ParseIntPipe) recordId: number) {
+  point(
+    @Req() request: Request,
+    @Param('recordId', ParseIntPipe) recordId: number,
+  ) {
+    this.requireHistory(request);
     const row = this.db.getRecord(recordId);
-    if (row == null) {
+    if (row == null || row.category !== 'TELEMETRY') {
       throw new HttpException('record not found', 404);
     }
     return this.detail(row);
   }
+}
+
+function flagsObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object';
 }

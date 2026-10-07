@@ -15,6 +15,7 @@ export const DOMAINS = [
   'geofences',
   'explorer',
   'alerts',
+  'tickets',
   'history',
   'reports',
   'lora_mesh',
@@ -33,6 +34,7 @@ export const OPERATIONAL_DOMAINS = [
   'geofences',
   'explorer',
   'alerts',
+  'tickets',
   'history',
   'reports',
 ] as const;
@@ -79,6 +81,7 @@ const SEED_ROLES: readonly SeedRole[] = [
       'geofences',
       'explorer',
       'alerts',
+      'tickets',
       'history',
       'weapons.read',
       'reports.read',
@@ -500,32 +503,37 @@ export function ensureSuperadminAccount(db: Database): void {
   recalculateUserStatus(db, userId);
 }
 
-export function seedAccess(db: Database): void {
-  const now = utcNow();
-  const permissionCount = (
-    db.prepare('SELECT COUNT(*) AS n FROM permissions').get() as any
-  ).n as number;
-  if (permissionCount === 0) {
-    const insertAll = db.prepare(
-      `INSERT INTO permissions (code, name, domain, action_type, description, created_at)
-       VALUES (?, ?, ?, 'ALL_ACTIONS', ?, ?)`,
-    );
-    const insertRead = db.prepare(
-      `INSERT INTO permissions (code, name, domain, action_type, description, created_at)
-       VALUES (?, ?, ?, 'READ', ?, ?)`,
-    );
-    for (const domain of DOMAINS) {
-      const label = domain
-        .replace(/_/g, ' ')
-        .split(' ')
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' ');
+function ensurePermissionCatalog(db: Database, now: string): void {
+  const insertAll = db.prepare(
+    `INSERT INTO permissions (code, name, domain, action_type, description, created_at)
+     VALUES (?, ?, ?, 'ALL_ACTIONS', ?, ?)`,
+  );
+  const insertRead = db.prepare(
+    `INSERT INTO permissions (code, name, domain, action_type, description, created_at)
+     VALUES (?, ?, ?, 'READ', ?, ?)`,
+  );
+  const exists = db.prepare('SELECT 1 AS ok FROM permissions WHERE code = ?');
+  for (const domain of DOMAINS) {
+    const label = domain
+      .replace(/_/g, ' ')
+      .split(' ')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+    if (exists.get(domain) == null) {
       insertAll.run(...bind([domain, label, domain, `All actions on ${label}.`, now]));
+    }
+    const readCode = `${domain}.read`;
+    if (exists.get(readCode) == null) {
       insertRead.run(
-        ...bind([`${domain}.read`, `${label} Read`, domain, `Read ${label}.`, now]),
+        ...bind([readCode, `${label} Read`, domain, `Read ${label}.`, now]),
       );
     }
   }
+}
+
+export function seedAccess(db: Database): void {
+  const now = utcNow();
+  ensurePermissionCatalog(db, now);
   const roleCount = (db.prepare('SELECT COUNT(*) AS n FROM roles').get() as any)
     .n as number;
   if (roleCount === 0) {

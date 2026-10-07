@@ -42,9 +42,11 @@ async function member(
   return [userId, await login(app, username, 'temporary-password')];
 }
 
-async function alert(app: INestApplication) {
+async function alert(app: INestApplication, headers?: Record<string, string>) {
+  const auth = headers ?? (await login(app));
   const listed = await request(app.getHttpServer())
     .get('/api/alerts')
+    .set(auth)
     .query({ alert_type: 'SOS', status: 'ACTIVE' });
   expect(listed.status).toBe(200);
   expect(listed.body.items.length).toBeGreaterThan(0);
@@ -100,7 +102,9 @@ describe('Tickets e2e (ported from test_tickets.py)', () => {
       .post(`/api/alerts/${source.id}/ticket`)
       .set(headers);
     expect(again.status).toBe(409);
-    const stored = await request(app.getHttpServer()).get(`/api/alerts/${source.id}`);
+    const stored = await request(app.getHttpServer())
+      .get(`/api/alerts/${source.id}`)
+      .set(headers);
     expect(stored.body.status).toBe('ACKNOWLEDGED');
 
     const listed = await request(app.getHttpServer())
@@ -393,7 +397,11 @@ describe('Tickets e2e (ported from test_tickets.py)', () => {
     expect(resolved.status).toBe(200);
     expect(resolved.body.status).toBe('RESOLVED');
     expect(
-      (await request(app.getHttpServer()).get(`/api/alerts/${source.id}`)).body.status,
+      (
+        await request(app.getHttpServer())
+          .get(`/api/alerts/${source.id}`)
+          .set(admin)
+      ).body.status,
     ).toBe('RESOLVED');
     const closed = await request(app.getHttpServer())
       .post(`/api/tickets/${ticketId}/close`)

@@ -46,7 +46,68 @@ export function resolveGroupName(
   const person = getPersonnelBySoldier(db, soldierId);
   if (person == null || person.group_id == null) return null;
   const group = getGroupById(db, person.group_id);
-  return group?.name ?? null;
+  if (group == null || group.status !== 'ACTIVE') return null;
+  return group.name ?? null;
+}
+
+/**
+ * Retire a Settings group and wipe its label from domain records.
+ * Explorer/History/Alerts store group as a name string — clear those too.
+ */
+export function retireGroup(db: Database, groupId: number): void {
+  const group = getGroupById(db, groupId);
+  if (group == null) return;
+  const now = utcNow();
+  const name = String(group.name || '').trim();
+
+  db.prepare(
+    `UPDATE groups SET status = 'INACTIVE', updated_at = ? WHERE id = ?`,
+  ).run(...bind([now, groupId]));
+  db.prepare('DELETE FROM operation_groups WHERE group_id = ?').run(groupId);
+  db.prepare('DELETE FROM group_members WHERE group_id = ?').run(groupId);
+  db.prepare(
+    'UPDATE personnel SET group_id = NULL, updated_at = ? WHERE group_id = ?',
+  ).run(...bind([now, groupId]));
+
+  if (name) {
+    clearGroupLabelFromRecords(db, name);
+  }
+}
+
+/** Clear stored group name on telemetry/alerts (Explorer GROUP column). */
+export function clearGroupLabelFromRecords(db: Database, groupName: string): void {
+  const name = String(groupName || '').trim();
+  if (!name) return;
+  db.prepare(
+    `UPDATE explorer_records SET group_id = NULL WHERE group_id = ? COLLATE NOCASE`,
+  ).run(name);
+  db.prepare(
+    `UPDATE alerts SET group_id = NULL, updated_at = ? WHERE group_id = ? COLLATE NOCASE`,
+  ).run(...bind([utcNow(), name]));
+}
+
+/** Wipe Explorer/Alerts labels that no longer map to an ACTIVE group. */
+export function purgeOrphanGroupLabels(db: Database): void {
+  db.prepare(
+    `
+    UPDATE explorer_records
+    SET group_id = NULL
+    WHERE group_id IS NOT NULL
+      AND group_id NOT IN (
+        SELECT name FROM groups WHERE status = 'ACTIVE' AND name IS NOT NULL
+      )
+    `,
+  ).run();
+  db.prepare(
+    `
+    UPDATE alerts
+    SET group_id = NULL, updated_at = ?
+    WHERE group_id IS NOT NULL
+      AND group_id NOT IN (
+        SELECT name FROM groups WHERE status = 'ACTIVE' AND name IS NOT NULL
+      )
+    `,
+  ).run(...bind([utcNow()]));
 }
 
 /** Optional personnel display name for Explorer enrichment (null if unknown). */

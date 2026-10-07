@@ -309,7 +309,7 @@ Ringkasan path (detail request/response di [`docs/BACKEND.md`](docs/BACKEND.md))
 - `GET /api/explorer` · `summary` · `filters/options` · `export.csv` · `:id`
   - Filter FE utama: `q`, `soldier_id`, `from_time`, `to_time`, `timeRange`, `limit`, `offset`
   - Bukan filter utama: Group / Status / Severity / Alert; transport hanya debug (`include_transport=1`)
-- `GET /api/alerts` · `summary` · `sos` · acknowledge/resolve · export
+- `GET /api/alerts` · `summary` · `sos` · acknowledge/resolve · export — Bearer + `alerts` (GET = read; ack/resolve = write; actor dari session; GET read-only, `syncNoContact` di ingest/sim)
 - `GET /api/history` · `track` · `statistics` · `charts` · export
 
 ### Geofences
@@ -481,11 +481,12 @@ Setiap test memakai DB sementara (tidak menyentuh `data/trackforge.db` lokal).
 2. **Permission**: gunakan `GET /auth/me` untuk hide/disable menu — BE tetap enforce.  
 3. **Pemisahan menu**: Explorer = inspect records; Operations = group/assignment; Prajurit = status personel; Alerts = severity; History = track; Audit = action log.  
 4. **Explorer filters**: `q`, `soldier_id`, time (`from_time`/`to_time`/`timeRange`), `limit`/`offset`. Jangan hidupkan filter Group/UPLINK/MESH di default FE.  
-5. **SOS**: `flags.sos` di TELEMETRY — tampil di Explorer & History; alert terpisah di Alerts.  
-6. **Operations wizard**: roster → `personnel/options`; Review → `POST /api/operations` dengan `groups[]` + `new_geofences[]`; Map → `.../map`.  
-7. **Group**: tidak ada di wire packet; enrichment dari Personnel master (boleh null jika master kosong).  
-8. **IDs**: numeric (`operations.id`); tampilkan `operation_code` ke user. Jangan mengarang Danru/soldier identity di contoh.  
-9. Error shape: HTTP status + detail (`DetailExceptionFilter`).
+5. **History**: Bearer + `history` read; wajib `scope=SOLDIER|GROUP`; default **TELEMETRY only**; `group_id` = nama group di telemetry (boleh kosong tanpa enrichment).  
+6. **SOS**: `flags.sos` di TELEMETRY — tampil di Explorer & History; alert terpisah di Alerts.  
+7. **Operations wizard**: roster → `personnel/options`; Review → `POST /api/operations` dengan `groups[]` + `new_geofences[]`; Map → `.../map`.  
+8. **Group**: tidak ada di wire packet; enrichment dari Personnel master (boleh null jika master kosong).  
+9. **IDs**: numeric (`operations.id`); tampilkan `operation_code` ke user. Jangan mengarang Danru/soldier identity di contoh.  
+10. Error shape: HTTP status + detail (`DetailExceptionFilter`).
 
 ---
 

@@ -12,7 +12,7 @@ import type { Response } from 'express';
 import { DatabaseService } from '../database/database.service';
 import { TIME_RANGES, canonicalTime, timeRangeStart } from '../common/records';
 import { bind } from '../common/sql';
-import { resolvePersonnelName } from '../database/personnel';
+import { purgeOrphanGroupLabels, resolvePersonnelName } from '../database/personnel';
 
 const CSV_COLUMNS = [
   'id', 'category', 'data_type', 'entity_type', 'entity_id', 'soldier_id',
@@ -175,6 +175,8 @@ export class ExplorerController {
 
   @Get()
   list(@Query() q: any) {
+    // Drop GROUP labels for retired/missing groups (e.g. removed from Operations).
+    purgeOrphanGroupLabels(this.db.connection);
     const { where, params } = this.filters(q);
     const limit = Math.min(Math.max(Number(q.limit || 50), 1), 500);
     const offset = Math.max(Number(q.offset || 0), 0);

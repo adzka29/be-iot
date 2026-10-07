@@ -5,7 +5,7 @@ import * as path from 'path';
 import { bind } from '../common/sql';
 import { seedExplorer } from './seed-explorer';
 import { seedAccess } from './access';
-import { seedPersonnelMaster } from './personnel';
+import { purgeOrphanGroupLabels, seedPersonnelMaster } from './personnel';
 import { runRetentionIfDue } from './retention';
 
 export const CATEGORIES = [
@@ -503,13 +503,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         n: number;
       }
     ).n;
-    // Unified seed: TELEMETRY → Explorer + raiseAlerts → History (same records).
-    // Idempotent: only when explorer is empty. Live sim continues afterward.
     if (explorerCount === 0 && process.env.TRACKFORGE_SEED !== '0') {
       seedExplorer(conn);
     }
 
     seedAccess(conn);
+    purgeOrphanGroupLabels(conn);
     runRetentionIfDue(conn);
   }
 

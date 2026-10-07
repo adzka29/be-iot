@@ -5,6 +5,7 @@ import {
   displayName,
   effectiveAccess,
   getUser,
+  hasPermission,
   isActiveBinding,
   loadBinding,
 } from '../database/access';
@@ -105,6 +106,11 @@ export class TicketsService {
   createFromAlert(request: Request, alertId: number) {
     const conn = this.db();
     const user = this.operator(conn, request);
+    const access = effectiveAccess(conn, user.id);
+    const granted = new Set(access?.permissions ?? []);
+    if (!hasPermission(granted, 'tickets', 'write')) {
+      throw new HttpException('permission denied', 403);
+    }
     const repo = new TicketRepository(conn);
     const alert = repo.getAlert(alertId);
     if (alert == null) throw new HttpException('alert not found', 404);

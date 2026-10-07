@@ -248,6 +248,10 @@ export function raiseAlerts(db: Database, args: RaiseAlertsArgs): void {
   }
 }
 
+/**
+ * Telemetry returned → NO_CONTACT incident CLEARED (engine), not operator RESOLVED.
+ * Deduped via openAlert: scheduler will not create a second ACTIVE while one is open.
+ */
 export function resolveNoContact(
   db: Database,
   soldierId: number,
@@ -257,7 +261,7 @@ export function resolveNoContact(
   db.prepare(
     `
     UPDATE alerts
-    SET status = 'RESOLVED', resolved_at = ?, resolved_by = 'engine', updated_at = ?
+    SET status = 'CLEARED', last_seen_at = ?, updated_at = ?
     WHERE soldier_id = ? AND alert_type = 'NO_CONTACT'
       AND status IN ('ACTIVE', 'ACKNOWLEDGED')
       AND event_time <= ?

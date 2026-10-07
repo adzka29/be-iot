@@ -212,6 +212,7 @@ describe('satellite burst ingest', () => {
       const alerts = (
         await request(harness.app.getHttpServer())
           .get('/api/alerts')
+          .set(headers)
           .query({ soldier_id: item.soldier_id, alert_type: item.alert_type })
       ).body;
       expect(alerts.total).toBeGreaterThanOrEqual(1);
@@ -262,6 +263,7 @@ describe('satellite burst ingest', () => {
     const alerts = (
       await request(harness.app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 801 })
     ).body;
     // No flag-derived alerts (SOS/casualty/etc.) from a clean burst payload.

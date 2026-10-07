@@ -195,7 +195,14 @@ export class OperationsService {
     if ('description' in fields) changes.description = this.optional(fields.description);
     if ('type' in fields) changes.type = this.optional(fields.type);
     if ('group_ids' in fields) {
-      repo.replaceGroups(operationId, this.resolveGroups(repo, fields.group_ids || []));
+      const previous = repo.linkedGroups(operationId).map((row) => row.id as number);
+      const next = this.resolveGroups(repo, fields.group_ids || []);
+      repo.replaceGroups(operationId, next);
+      for (const groupId of previous) {
+        if (!next.includes(groupId) && repo.operationLinkCount(groupId) === 0) {
+          repo.deactivateGroup(groupId);
+        }
+      }
     }
     if ('geofence_ids' in fields) {
       repo.replaceGeofences(
@@ -228,8 +235,16 @@ export class OperationsService {
         409,
       );
     }
+    const linkedGroupIds = repo.linkedGroups(operationId).map((row) => row.id as number);
     const now = utcNow();
     repo.updateOperation(operationId, { deleted_at: now, updated_at: now });
+    // Soft-deleted ops no longer count as links — retire orphan groups and
+    // clear their names from Explorer/Alerts (GROUP column).
+    for (const groupId of linkedGroupIds) {
+      if (repo.operationLinkCount(groupId) === 0) {
+        repo.deactivateGroup(groupId);
+      }
+    }
     this.audit(conn, user, request, operation, 'OPERATION_DELETED', 'DELETE', 'Deleted an operation.');
   }
 
@@ -302,6 +317,11 @@ export class OperationsService {
     const operation = this.operation(repo, operationId);
     if (repo.unlinkGroup(operationId, groupId) === 0) {
       throw new HttpException('group is not assigned', 404);
+    }
+    // If no other live operation uses this group, retire it so picker/detail
+    // no longer show a dangling group field after remove.
+    if (repo.operationLinkCount(groupId) === 0) {
+      repo.deactivateGroup(groupId);
     }
     repo.updateOperation(operationId, { updated_at: utcNow() });
     this.audit(conn, user, request, operation, 'OPERATION_GROUP_REMOVED', 'DELETE', 'Removed a group from an operation.', {

@@ -22,9 +22,11 @@ import {
   loadBinding,
 } from '../database/access';
 import {
+  clearGroupLabelFromRecords,
   getGroupById,
   getGroupByName,
   getPersonnelBySoldier,
+  retireGroup,
 } from '../database/personnel';
 import { actorFromSession, sessionToken } from '../common/audit';
 import { utcNow } from '../common/records';
@@ -178,6 +180,33 @@ export class PersonnelController {
     }
     if (!Object.keys(fields).length) {
       throw new HttpException('no group changes', 422);
+    }
+    const previousName = row.name as string;
+    // Retire before rename so Explorer labels under the old name are cleared.
+    if (fields.status === 'INACTIVE') {
+      retireGroup(this.db.connection, groupId);
+      if (fields.name && String(fields.name) !== previousName) {
+        clearGroupLabelFromRecords(this.db.connection, previousName);
+      }
+      // Apply remaining non-status fields (name/description) after retire.
+      const rest: Record<string, unknown> = { ...fields };
+      delete rest.status;
+      if (Object.keys(rest).length) {
+        try {
+          const assignments = Object.keys(rest)
+            .map((c) => `${c} = ?`)
+            .join(', ');
+          this.db.connection
+            .prepare(`UPDATE groups SET ${assignments} WHERE id = ?`)
+            .run(...bind([...Object.values(rest), groupId]));
+        } catch (exc: any) {
+          if (/UNIQUE/i.test(String(exc?.message))) {
+            throw new HttpException('group already exists', 409);
+          }
+          throw exc;
+        }
+      }
+      return this.groupItem(getGroupById(this.db.connection, groupId));
     }
     try {
       const assignments = Object.keys(fields)

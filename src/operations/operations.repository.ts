@@ -3,6 +3,8 @@ import { bind } from '../common/sql';
 import { utcNow } from '../common/records';
 import {
   groupMemberCount,
+  purgeOrphanGroupLabels,
+  retireGroup,
   setGroupMembers,
 } from '../database/personnel';
 
@@ -10,7 +12,15 @@ export class OperationRepository {
   constructor(private readonly db: Database) {}
 
   syncGroups() {
-    // no-op — groups are master data
+    // Drop links to retired groups so operation.groups / counts stay accurate.
+    this.db
+      .prepare(
+        `DELETE FROM operation_groups
+         WHERE group_id IN (SELECT id FROM groups WHERE status != 'ACTIVE')`,
+      )
+      .run();
+    // Explorer may still hold stale group names (e.g. "patorl") after retire.
+    purgeOrphanGroupLabels(this.db);
   }
 
   groups() {
@@ -108,9 +118,35 @@ export class OperationRepository {
         `SELECT g.id, g.name, g.description, g.leader_soldier_id, g.status
          FROM operation_groups og
          JOIN groups g ON g.id = og.group_id
-         WHERE og.operation_id = ? ORDER BY g.name COLLATE NOCASE`,
+         WHERE og.operation_id = ? AND g.status = 'ACTIVE'
+         ORDER BY g.name COLLATE NOCASE`,
       )
       .all(operationId) as any[];
+  }
+
+  /** How many non-deleted operations still link this group. */
+  operationLinkCount(groupId: number) {
+    return (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n
+           FROM operation_groups og
+           JOIN operations o ON o.id = og.operation_id
+           WHERE og.group_id = ? AND o.deleted_at IS NULL`,
+        )
+        .get(groupId) as any
+    ).n as number;
+  }
+
+  /** Drop stale links (e.g. after Settings marks group INACTIVE). */
+  unlinkGroupFromAllOperations(groupId: number) {
+    return this.db
+      .prepare('DELETE FROM operation_groups WHERE group_id = ?')
+      .run(groupId).changes;
+  }
+
+  deactivateGroup(groupId: number) {
+    retireGroup(this.db, groupId);
   }
 
   linkedGeofences(operationId: number) {

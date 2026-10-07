@@ -311,13 +311,86 @@ describe('Operations e2e (ported from test_operations.py)', () => {
       .set(admin);
     expect(removed.status).toBe(200);
     expect(removed.body.groups).toEqual([]);
+    expect(removed.body.summary.group_count).toBe(0);
+    // Alpha still linked to the first operation → stays in picker.
     expect(
       (
         await request(app.getHttpServer())
           .get('/api/operations/groups/options')
           .set(admin)
-      ).body.items.length,
-    ).toBeGreaterThan(0);
+      ).body.items.some((item: any) => item.id === alphaId),
+    ).toBe(true);
+
+    // Group only used by this operation: remove → disappears from detail + picker.
+    const lone = await request(app.getHttpServer())
+      .post('/api/groups')
+      .set(admin)
+      .send({ name: 'Lone Cell' });
+    expect(lone.status).toBe(201);
+    await request(app.getHttpServer())
+      .post(`/api/operations/${otherId}/groups`)
+      .set(admin)
+      .send({ group_id: lone.body.id });
+    const loneRemoved = await request(app.getHttpServer())
+      .delete(`/api/operations/${otherId}/groups/${lone.body.id}`)
+      .set(admin);
+    expect(loneRemoved.body.groups).toEqual([]);
+    expect(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/operations/${otherId}`)
+          .set(admin)
+      ).body.groups,
+    ).toEqual([]);
+    expect(
+      (
+        await request(app.getHttpServer())
+          .get('/api/operations/groups/options')
+          .set(admin)
+      ).body.items.some((item: any) => item.id === lone.body.id),
+    ).toBe(false);
+
+    // Explorer must not keep the retired group name on telemetry rows.
+    const stamped = await request(app.getHttpServer())
+      .post('/api/operations')
+      .set(admin)
+      .send({
+        name: 'Stamp Group Op',
+        start_at: '2026-10-06T08:00:00Z',
+        end_at: '2026-10-09T18:00:00Z',
+        groups: [
+          {
+            name: 'patorl',
+            leader_soldier_id: 103,
+            member_soldier_ids: [103, 104],
+          },
+        ],
+      });
+    expect(stamped.status).toBe(201);
+    const patorlId = stamped.body.groups.find((g: any) => g.name === 'patorl').id;
+    harness.moduleRef
+      .get(DatabaseService)
+      .connection.prepare(
+        `UPDATE explorer_records SET group_id = 'patorl'
+         WHERE soldier_id IN (103, 104) AND category = 'TELEMETRY'`,
+      )
+      .run();
+    expect(
+      (
+        await request(app.getHttpServer())
+          .get('/api/explorer')
+          .query({ soldier_id: 103, limit: 1 })
+      ).body.items[0].group_id,
+    ).toBe('patorl');
+    const retired = await request(app.getHttpServer())
+      .delete(`/api/operations/${stamped.body.id}/groups/${patorlId}`)
+      .set(admin);
+    expect(retired.status).toBe(200);
+    expect(retired.body.groups).toEqual([]);
+    const cleared = await request(app.getHttpServer())
+      .get('/api/explorer')
+      .query({ soldier_id: 103, limit: 1 });
+    expect(cleared.body.items[0].group_id).toBeNull();
 
     const attached = await request(app.getHttpServer())
       .post(`/api/operations/${otherId}/geofences`)

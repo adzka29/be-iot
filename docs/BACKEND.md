@@ -284,18 +284,72 @@ Response item memaparkan field publik + objek `data` (parsed `data_json`). Name/
 ## 8. Alerts
 
 Prefix: `/api/alerts`  
-Permission: `alerts`
+**Auth:** Bearer session wajib  
+**Permission:** `alerts` read (GET) · `alerts` write (acknowledge / resolve)
 
-| Method | Path |
-|--------|------|
-| GET | `/api/alerts` |
-| GET | `/api/alerts/summary` |
-| GET | `/api/alerts/filters/options` |
-| GET | `/api/alerts/export.csv` |
-| GET | `/api/alerts/sos` |
-| GET | `/api/alerts/:alertId` |
-| POST | `/api/alerts/:alertId/acknowledge` |
-| POST | `/api/alerts/:alertId/resolve` |
+```
+TELEMETRY ingest / live sim
+        │
+   ┌────┴────┐
+raiseAlerts()  syncNoContact()   ← command/detection (bukan GET)
+   └────┬────┘
+        ▼
+      alerts
+        │
+   GET /api/alerts/*   ← read-only
+   POST ack / resolve  ← actor dari session
+   POST …/ticket       ← tickets write
+```
+
+| Method | Path | Auth |
+|--------|------|------|
+| GET | `/api/alerts` | session + `alerts.read` |
+| GET | `/api/alerts/summary` | session + `alerts.read` |
+| GET | `/api/alerts/filters/options` | session + `alerts.read` |
+| GET | `/api/alerts/export.csv` | session + `alerts.read` |
+| GET | `/api/alerts/sos` | session + `alerts.read` — shortcut `alert_type=SOS` + status open |
+| GET | `/api/alerts/:alertId` | session + `alerts.read` |
+| POST | `/api/alerts/:alertId/acknowledge` | session + `alerts` write |
+| POST | `/api/alerts/:alertId/resolve` | session + `alerts` write |
+| POST | `/api/alerts/:alertId/ticket` | session + `tickets` write |
+
+`GET` **tidak** menjalankan `syncNoContact()`. Detection NO_CONTACT jalan di ingest (`raiseAlerts` → scan) dan seed/live simulator (satu kali per tick).
+
+### Dedup / lifecycle
+
+Identitas incident terbuka: `soldier_id` + `alert_type` + status `ACTIVE|ACKNOWLEDGED`.
+
+- Packet berikutnya dengan flag sama → update `last_seen_at` / `source_record_id`, **bukan** alert baru.
+- Flag kembali normal → status **`CLEARED`** (engine).
+- Operator: `ACTIVE` → `ACKNOWLEDGED` → **`RESOLVED`**.
+- `CLEARED` ≠ `RESOLVED`. Engine tidak menghidupkan kembali alert yang sudah `RESOLVED` tanpa incident baru (setelah episode tutup, flag on lagi → alert baru).
+- `NO_CONTACT`: gap > 30 menit → `ACTIVE`; telemetry kembali → **`CLEARED`** (bukan RESOLVED). Scheduler idempotent via open-alert check.
+
+Acknowledge / resolve **tidak** menerima `{ "by": "…" }` di body. Backend mengisi `acknowledged_by` / `resolved_by` dari user session (`user.name`).
+
+### `group_id` pada alert
+
+Application-level identifier = **nama group** (string, sama dengan `explorer_records.group_id` / Personnel enrichment), bukan numeric FK.
+
+### Summary timeline buckets
+
+Response `GET /api/alerts/summary` menyertakan `timeline_bucket`:
+
+| Window | Bucket |
+|--------|--------|
+| `timeRange=30d` (dan sinonim) | `1d` |
+| span ≤ 1 jam (`from_time`/`to_time` atau range pendek) | `5m` |
+| default / 24h-class | `1h` |
+
+```json
+{
+  "total": 12,
+  "timeline_bucket": "1h",
+  "timeline": [{ "time": "2026-10-07T12:00:00Z", "count": 2 }],
+  "by_severity": [],
+  "by_type": []
+}
+```
 
 ### Tipe alert (dari flag / aturan)
 
@@ -309,8 +363,6 @@ Permission: `alerts`
 | STRAP_DISCONNECTED | INFO | strap off |
 | NO_CONTACT | INFO | gap > 30 menit tanpa telemetry |
 
-Status terbuka: `ACTIVE`, `ACKNOWLEDGED` → resolve menutup.
-
 Buat ticket dari alert:
 
 ```http
@@ -318,38 +370,69 @@ POST /api/alerts/:alertId/ticket
 Authorization: Bearer ...
 ```
 
-→ `201` ticket baru (`source_alert_id` unik per alert).
+→ `201` ticket baru (`source_alert_id` unik per alert). Permission: **`tickets` write**.
 
 ---
 
 ## 9. History
 
 Prefix: `/api/history`  
-Permission: `history`
+**Auth:** Bearer session wajib  
+**Permission:** `history` read
 
 | Layer | Peran |
 |-------|--------|
-| **Explorer** | Record inspection / search |
-| **History** | Chronological telemetry history / track |
+| **Explorer** | “Data apa yang masuk?” — inspect/search records |
+| **History** | “Prajurit ini bergerak/terekam bagaimana?” — track & histori TELEMETRY |
+| **Alerts** | “Ada kondisi abnormal?” — dari `raiseAlerts()` |
+| **Audit** | Action log CREATE/UPDATE/ACK… (bukan History) |
 
-Keduanya membaca **`explorer_records` TELEMETRY yang sama**.  
-History **tidak** punya tabel/seed telemetry terpisah.
+Sumber: **`explorer_records`** (domain default **`TELEMETRY`**).  
+`UPLINK` / `SATELLITE_BURST` = transport/audit internal — **bukan** default History.
 
-Action/audit (`CREATE`, `UPDATE`, `DELETE`, `ACKNOWLEDGE`, …) tetap milik **Audit logs** (section 14), bukan History.
+```
+explorer_records (TELEMETRY)
+        │
+   ┌────┼────┐
+Explorer History Alerts
+           │
+    Summary / Track / Charts
+```
 
 | Method | Path | Keterangan |
 |--------|------|------------|
-| GET | `/api/history` | List titik |
-| GET | `/api/history/filters/options` | Filter UI |
-| GET | `/api/history/summary` | Summary (+ timeRange) |
-| GET | `/api/history/statistics` | Statistik |
-| GET | `/api/history/charts` | Data chart |
-| GET | `/api/history/track` | Track per soldier |
-| GET | `/api/history/export.csv` | Export |
-| GET | `/api/history/point/:recordId` | Satu titik |
+| GET | `/api/history` | List TELEMETRY |
+| GET | `/api/history/filters/options` | Soldier, group name, time, position_source |
+| GET | `/api/history/summary` | Jarak, avg HR/batt, `total_records` (= telemetry) |
+| GET | `/api/history/statistics` | `telemetry_count`, by_position_source, by_soldier |
+| GET | `/api/history/charts` | Bucket per jam (HR/battery) — agregasi aktual, bukan hard-code |
+| GET | `/api/history/track` | GPS track TELEMETRY saja |
+| GET | `/api/history/export.csv` | Export sesuai filter |
+| GET | `/api/history/point/:recordId` | Detail TELEMETRY (404 jika bukan TELEMETRY) |
 
-Preset waktu (mis. All time / 30 day) diterapkan di summary/list sesuai query `timeRange` / from-to.  
-SOS telemetry tetap muncul (`flags.sos`); legacy `is_sos` bukan filter.
+### Query wajib
+
+```
+?scope=SOLDIER&soldier_id=104&timeRange=all
+?scope=GROUP&group_id=Alpha&timeRange=all
+```
+
+**`group_id` di History** = nilai yang tersimpan di `explorer_records.group_id`  
+(= **nama group string** hasil enrichment, bukan numeric `groups.id`).  
+Tanpa personnel/group enrichment → GROUP scope sering `0` (normal).
+
+Default category = **TELEMETRY**.  
+`history_data_type` boleh override untuk debug backend; FE operasional jangan kirim UPLINK/MESH.
+
+### Response notes
+
+- `data_type` di item History = label dari **category** → `"TELEMETRY"` (bukan DB `SOLDIER_TELEMETRY`).
+- `summary.total_records` / `telemetry_count` = jumlah TELEMETRY (bukan transport).
+- `track` length boleh ≠ `total_records` jika ada dedupe / titik tanpa koordinat.
+- Detail `point`: `position`, `vitals`, `device` (batt+flags), `packet_reference`, `raw_data`.  
+  **Tidak** ada Communication legacy (`hop_count` / `rssi` / `snr`) — payload 21-byte tidak membawanya.
+
+SOS TELEMETRY tetap muncul (`flags.sos`); legacy `is_sos` bukan filter.
 
 ---
 
@@ -422,161 +505,397 @@ Response field berguna FE:
 
 ---
 
-## 12. Operations
+## 12. Operations — FE integration contract
 
 Prefix: `/api/operations`  
-Permission domain: **`operations`** (read vs write)
+**Auth:** `Authorization: Bearer <session_id>` wajib di semua endpoint  
+**Permission:** `operations.read` (GET) · `operations` / write (POST/PATCH/DELETE + lifecycle)
 
-Semua endpoint di bawah ini butuh Bearer session.
+### ID types (jangan campur)
 
-### Read helpers
+| Nama di URL/body | Tipe | Asal |
+|------------------|------|------|
+| `:operationId` / `id` | number | PK `operations` |
+| `:groupId` / `group_id` / `group_ids[]` | number | PK `groups` (Settings) |
+| `:geofenceId` / `geofence_id` / `geofence_ids[]` | number | PK `geofences` |
+| `soldier_id` / `leader_soldier_id` / `member_soldier_ids[]` | number | Personnel (`103`; `"S-103"` → `103`) |
+| `group_id` di Alerts/Explorer | **string nama** | Bukan PK — beda kontrak |
 
-| Method | Path | Keterangan |
-|--------|------|------------|
-| GET | `/api/operations` | List + filter `q,status,group_id,start_from,start_to,page,limit` |
-| GET | `/api/operations/summary` | Count per status |
-| GET | `/api/operations/filters/options` | Status + groups |
-| GET | `/api/operations/groups/options` | Picker group + personnel_count |
-| GET | `/api/operations/personnel/options?q=` | Roster wizard (personnel + last lat/lon/seen) |
-| GET | `/api/operations/:id` | Detail |
-| GET | `/api/operations/:id/groups` | Groups linked |
-| GET | `/api/operations/:id/personnel` | Anggota via membership |
-| GET | `/api/operations/:id/map` | operation + groups + positions + geofences |
-| GET | `/api/operations/:id/alerts` | Alerts di scope soldier/group |
-| GET | `/api/operations/:id/tickets` | Tickets dari alert scope |
+Status operation: `PLANNING` | `ACTIVE` | `ON_HOLD` | `COMPLETED` | `CANCELLED`.
 
-### Write — create (wizard + legacy)
+---
 
-```http
-POST /api/operations
-```
+### Endpoint map
 
-Body diizinkan:
+| Method | Path | Perm | Response |
+|--------|------|------|----------|
+| GET | `/api/operations` | read | list page |
+| GET | `/api/operations/summary` | read | counts |
+| GET | `/api/operations/filters/options` | read | filter enums |
+| GET | `/api/operations/groups/options` | read | group picker |
+| GET | `/api/operations/personnel/options` | read | soldier picker |
+| POST | `/api/operations` | write | **detail** (`201`) |
+| GET | `/api/operations/:operationId` | read | **detail** |
+| PATCH | `/api/operations/:operationId` | write | **detail** |
+| DELETE | `/api/operations/:operationId` | write | empty `204` |
+| POST | `/api/operations/:operationId/activate` | write | **detail** |
+| POST | `/api/operations/:operationId/hold` | write | **detail** |
+| POST | `/api/operations/:operationId/resume` | write | **detail** |
+| POST | `/api/operations/:operationId/complete` | write | **detail** |
+| POST | `/api/operations/:operationId/cancel` | write | **detail** |
+| GET | `/api/operations/:operationId/groups` | read | `{ items: GroupItem[] }` |
+| POST | `/api/operations/:operationId/groups` | write | **detail** |
+| DELETE | `/api/operations/:operationId/groups/:groupId` | write | **detail** |
+| POST | `/api/operations/:operationId/geofences` | write | **detail** |
+| DELETE | `/api/operations/:operationId/geofences/:geofenceId` | write | **detail** |
+| GET | `/api/operations/:operationId/personnel` | read | `{ items: PersonnelItem[] }` |
+| GET | `/api/operations/:operationId/map` | read | map payload |
+| GET | `/api/operations/:operationId/alerts` | read | `{ items: OpAlert[] }` |
+| GET | `/api/operations/:operationId/tickets` | read | `{ items: OpTicket[] }` |
 
-| Field | Wajib | Keterangan |
-|-------|-------|------------|
-| `name` | Ya | Trim, max 160 |
-| `description` | Tidak | Max 2000 |
-| `start_at` / `end_at` | Ya | `end_at > start_at` |
-| `type` | Tidak | Mis. `Reconnaissance` |
-| `group_ids` | Tidak | Link group existing |
-| `groups` | Tidak | Inline create group+members |
-| `geofence_ids` | Tidak | Link geofence existing |
-| `new_geofences` | Tidak | Inline create geofence |
-| `status` | **Ditolak** | Selalu PLANNING |
+Field ekstra di body → `422 unexpected fields: …`.
 
-Inline group (gunakan `soldier_id` integer yang **benar-benar ada** di Personnel master development — jangan mengarang identitas Danru):
+---
+
+### Shared response shapes
+
+#### `OperationListItem` — `GET /api/operations` → `items[]`
+
+| Field | Type | Keterangan |
+|-------|------|------------|
+| `id` | number | |
+| `operation_code` | string | mis. `OP-2026-001` |
+| `name` | string | |
+| `description` | string \| null | |
+| `type` | string \| null | |
+| `status` | string | enum di atas |
+| `start_at` | string | ISO UTC |
+| `end_at` | string | ISO UTC |
+| `group_count` | number | |
+| `personnel_count` | number | unique soldiers di scope |
+| `geofence_count` | number | |
+| `created_at` | string | ISO UTC |
 
 ```json
 {
-  "name": "Example Group",
-  "leader_soldier_id": "<existing-soldier-id>",
-  "member_soldier_ids": ["<existing-soldier-id>"]
+  "items": [],
+  "page": 1,
+  "limit": 20,
+  "total": 3
 }
 ```
 
-Contoh valid setelah master terisi (mis. lewat wizard sebelumnya): `"leader_soldier_id": 103`, `"member_soldier_ids": [103, 106, 110]`. String `"S-103"` dinormalisasi ke `103` jika dikirim, tetapi identitas harus berasal dari roster nyata.
+#### `OperationDetail` — create / get / patch / lifecycle / add-remove group|geofence
 
-Inline geofence:
+| Field | Type |
+|-------|------|
+| `id` | number |
+| `operation_code` | string |
+| `name` | string |
+| `description` | string \| null |
+| `type` | string \| null |
+| `status` | string |
+| `start_at` | string |
+| `end_at` | string |
+| `groups` | `GroupRef[]` |
+| `geofences` | `{ id, name, kind, color, area_km2 }[]` |
+| `summary` | `{ group_count, personnel_count, geofence_count }` |
+| `counts` | `{ groups, personnel, geofences }` — alias angka yang sama |
+| `created_by` | `{ id, name }` |
+| `created_at` | string |
+
+#### `GroupRef`
+
+| Field | Type |
+|-------|------|
+| `id` | number | PK groups |
+| `name` | string |
+| `leader_soldier_id` | number \| null |
+| `personnel_count` | number |
+
+#### `GroupItem` — `GET .../groups` → `items[]`
+
+| Field | Type |
+|-------|------|
+| `id` | number |
+| `name` | string |
+| `leader_soldier_id` | number \| null |
+| `commander` | `{ soldier_id }` \| null |
+| `personnel_count` | number |
+| `status` | string | status group Settings |
+
+#### `PersonnelItem` — `GET .../personnel` → `items[]`
+
+| Field | Type | Keterangan |
+|-------|------|------------|
+| `soldier_id` | number | |
+| `group_id` | number | **PK groups** (bukan nama) |
+| `group_name` | string | |
+
+#### Map — `GET .../map`
 
 ```json
 {
-  "name": "New Zone",
-  "kind": "recon",
-  "color": "#F2A900",
-  "polygon": [[lng,lat],[lng,lat],[lng,lat]],
-  "geometry_json": "{\"type\":\"Polygon\",\"coordinates\":[[[...]]]}",
-  "area_km2": 0.3
+  "operation": { "id": 1, "name": "Ops Alpha" },
+  "groups": [],
+  "personnel": [],
+  "geofences": [{ "id": 1, "name": "Zone A", "polygon": [[106.81, -6.20], [106.83, -6.20], [106.82, -6.22]] }],
+  "positions": [{
+    "soldier_id": 103,
+    "group_id": 1,
+    "group_name": "Alpha",
+    "latitude": -6.21,
+    "longitude": 106.82,
+    "event_time": "2026-10-07T12:00:00Z"
+  }]
 }
 ```
 
-`geometry_json` opsional: GeoJSON Polygon → ring diekstrak ke `polygon_json` (titik penutup ring dibuang jika ada).
+`latitude` / `longitude` / `event_time` bisa `null` jika belum ada TELEMETRY.
+
+#### Op alerts / tickets (ringkas)
+
+`GET .../alerts` → `items[]`:
+
+| Field | Type | Catatan |
+|-------|------|---------|
+| `id` | number | alert id |
+| `type` | string | = `alert_type` |
+| `severity` | string | |
+| `soldier_id` | number \| null | |
+| `group_id` | number \| null | **PK groups** (di-map dari nama alert) |
+| `status` | string | ACTIVE / ACKNOWLEDGED / CLEARED / RESOLVED |
+| `event_time` | string | |
+
+`GET .../tickets` → `items[]`:
+
+| Field | Type |
+|-------|------|
+| `id` | number |
+| `ticket_code` | string |
+| `status` | string |
+| `priority` | string |
+| `source_alert_id` | number |
+| `alert_type` | string |
+
+---
+
+### Wizard helpers (tanpa `:operationId`)
+
+#### `GET /api/operations/summary`
+
+```json
+{
+  "total": 5,
+  "planning": 1,
+  "active": 2,
+  "on_hold": 0,
+  "completed": 1,
+  "cancelled": 1
+}
+```
+
+#### `GET /api/operations/filters/options`
+
+```json
+{
+  "statuses": ["PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"],
+  "groups": [{ "id": 1, "name": "Alpha" }]
+}
+```
+
+#### `GET /api/operations/groups/options` → `{ "items": GroupChoice[] }`
+
+`GroupChoice` = `GroupRef` + `commander_name` (saat ini selalu `null`).
+
+#### `GET /api/operations/personnel/options?q=`
+
+| Field | Type | Keterangan |
+|-------|------|------------|
+| `soldier_id` | number | |
+| `name` | string | |
+| `group_id` | number \| null | PK groups |
+| `group_name` | string \| null | |
+| `access_group` | string | `group_name` atau `"UNASSIGNED"` |
+| `last_seen` | string \| null | ISO dari TELEMETRY terakhir |
+| `lat` / `lon` | number \| null | dari TELEMETRY terakhir |
+
+Response: `{ "items": [ ... ] }`.
+
+#### `GET /api/operations` — query
+
+| Query | Type | Default | Keterangan |
+|-------|------|---------|------------|
+| `q` | string | — | search `name` / `operation_code` |
+| `status` | string | — | satu status; unknown → `400` |
+| `group_id` | number | — | filter operation yang link group PK ini |
+| `start_from` / `start_to` | ISO | — | filter `start_at` |
+| `page` | number | `1` | |
+| `limit` | number | `20` | max `100` |
+
+---
+
+### Create — `POST /api/operations` → `201` + `OperationDetail`
+
+Body **hanya** field berikut (lainnya → `422`):
+
+| Field | Wajib | Type | Rules |
+|-------|-------|------|-------|
+| `name` | Ya | string | trim, max 160 |
+| `description` | Tidak | string \| null | max 2000 |
+| `start_at` | Ya | ISO string | |
+| `end_at` | Ya | ISO string | harus `> start_at` |
+| `type` | Tidak | string \| null | mis. `Reconnaissance` |
+| `group_ids` | Tidak | number[] | existing group PKs |
+| `groups` | Tidak | InlineGroup[] | create group baru lalu link |
+| `geofence_ids` | Tidak | number[] | existing geofence PKs |
+| `new_geofences` | Tidak | InlineGeofence[] | create fence baru lalu link |
+| `status` | **Jangan kirim** | — | selalu `PLANNING` |
+
+#### `InlineGroup`
+
+| Field | Wajib | Type |
+|-------|-------|------|
+| `name` | Ya | string |
+| `member_soldier_ids` | Ya | number[] (min 1; soldier harus ada di Personnel) |
+| `leader_soldier_id` | Tidak | number — jika ada, dijamin masuk members |
+| `description` | Tidak | string \| null |
+
+#### `InlineGeofence`
+
+| Field | Wajib | Type |
+|-------|-------|------|
+| `name` | Ya | string |
+| `polygon` **atau** `geometry_json` | Ya | `[[lng,lat],...]` (≥3) **atau** GeoJSON Polygon |
+| `kind` | Tidak | string \| null |
+| `color` | Tidak | string \| null (hex) |
+| `description` | Tidak | string \| null |
+| `area_km2` | Tidak | number — auto-hitung jika kosong |
+
+Contoh wizard:
+
+```json
+{
+  "name": "Night Recon",
+  "description": "Sector east",
+  "type": "Reconnaissance",
+  "start_at": "2026-10-08T01:00:00Z",
+  "end_at": "2026-10-08T09:00:00Z",
+  "group_ids": [1],
+  "groups": [{
+    "name": "Bravo Cell",
+    "leader_soldier_id": 111,
+    "member_soldier_ids": [111, 112, 113]
+  }],
+  "geofence_ids": [],
+  "new_geofences": [{
+    "name": "AO East",
+    "kind": "recon",
+    "color": "#F2A900",
+    "polygon": [[106.81, -6.20], [106.83, -6.20], [106.82, -6.22]]
+  }]
+}
+```
 
 Transaksi: gagal di tengah → rollback seluruh create.
 
-Response detail mencakup:
+---
 
-```json
-{
-  "id": 1,
-  "operation_code": "OP-2026-001",
-  "name": "...",
-  "type": "Reconnaissance",
-  "status": "PLANNING",
-  "groups": [{ "id": 1, "name": "Example Group", "leader_soldier_id": 103, "personnel_count": 3 }],
-  "geofences": [{ "id": 1, "name": "...", "kind": "recon", "color": "#F2A900", "area_km2": 0.3 }],
-  "summary": { "group_count": 1, "personnel_count": 8, "geofence_count": 1 },
-  "created_by": { "id": 1, "name": "Superadmin" },
-  "created_at": "..."
-}
-```
+### Update — `PATCH /api/operations/:operationId` → `OperationDetail`
 
-### Update
+Body allowed: `name`, `description`, `start_at`, `end_at`, `type`, `group_ids`, `geofence_ids`.  
+Minimal satu field. `group_ids` / `geofence_ids` = **replace penuh** link (bukan merge).  
+`status` → `422 unexpected fields`. Jangan kirim `groups` / `new_geofences` di PATCH — pakai nested POST.
 
-```http
-PATCH /api/operations/:id
-```
+---
 
-Field: `name`, `description`, `start_at`, `end_at`, `type`, `group_ids`, `geofence_ids`.  
-`status` lewat PATCH **ditolak** — pakai endpoint lifecycle.
+### Delete — `DELETE /api/operations/:operationId` → `204`
 
-### Delete
+| Status sekarang | Hasil |
+|-----------------|-------|
+| PLANNING, COMPLETED, CANCELLED | soft-delete OK |
+| ACTIVE, ON_HOLD | `409` — complete/cancel dulu |
 
-```http
-DELETE /api/operations/:id
-→ 204
-```
+---
 
-| Status | Hasil |
-|--------|-------|
-| PLANNING, COMPLETED, CANCELLED | 204 soft-delete |
-| ACTIVE, ON_HOLD | 409 |
-
-### Lifecycle
+### Lifecycle (body kosong) → `OperationDetail`
 
 | Method | Path | Dari → Ke |
 |--------|------|-----------|
 | POST | `.../activate` | PLANNING → ACTIVE |
 | POST | `.../hold` | ACTIVE → ON_HOLD |
 | POST | `.../resume` | ON_HOLD → ACTIVE |
-| POST | `.../complete` | ACTIVE/ON_HOLD → COMPLETED |
-| POST | `.../cancel` | PLANNING/ACTIVE/ON_HOLD → CANCELLED |
+| POST | `.../complete` | ACTIVE \| ON_HOLD → COMPLETED (+ `completed_at`) |
+| POST | `.../cancel` | PLANNING \| ACTIVE \| ON_HOLD → CANCELLED |
+
+Salah transisi → `409` (`operation cannot move from X to Y`).
+
+---
 
 ### Nested groups / geofences
 
-```http
-POST /api/operations/:id/groups
+#### `POST .../groups` → `OperationDetail`
+
+Opsi A — link existing:
+
+```json
 { "group_id": 1 }
-# atau
-{ "name": "Bravo Cell", "leader_soldier_id": 111, "member_soldier_ids": [111, 112] }
-
-DELETE /api/operations/:id/groups/:groupId
-
-POST /api/operations/:id/geofences
-{ "geofence_id": 1 }
-# atau body new geofence (sama shape new_geofences[])
-
-DELETE /api/operations/:id/geofences/:geofenceId
 ```
 
-Duplicate link → `409`.
+Opsi B — create + link (sama `InlineGroup`):
+
+```json
+{
+  "name": "Bravo Cell",
+  "leader_soldier_id": 111,
+  "member_soldier_ids": [111, 112]
+}
+```
+
+Duplicate → `409`. Missing → `422`.
+
+#### `DELETE .../groups/:groupId` → `OperationDetail`
+
+Unlink saja (group Settings tidak dihapus). Belum linked → `404`.
+
+#### `POST .../geofences` → `OperationDetail`
+
+```json
+{ "geofence_id": 1 }
+```
+
+atau body `InlineGeofence` (`name` + `polygon` / `geometry_json`).
+
+#### `DELETE .../geofences/:geofenceId` → `OperationDetail`
+
+Unlink; belum linked → `404`.
+
+---
 
 ### Scope derived data
 
-Personnel / map / alerts / tickets dihitung dari:
-
 ```
-operation_groups → group_members → personnel (+ last telemetry)
+operation_groups → group_members → personnel (+ last TELEMETRY)
 ```
 
 Fallback: `personnel.group_id` jika members kosong.
+
+### FE flow singkat (wizard)
+
+1. Login → simpan Bearer.  
+2. `GET .../groups/options` + `GET .../personnel/options?q=` (+ `GET /api/geofences` jika perlu).  
+3. `POST /api/operations` sekali di Review.  
+4. Redirect: `GET /api/operations/:id` + `GET .../map`.  
+5. Tombol lifecycle sesuai `status` + permission write.  
+6. Jangan kirim `status` saat create; jangan PATCH `status`.
 
 ---
 
 ## 13. Tickets
 
 Ticket **hanya** dibuat dari alert (`POST /api/alerts/:id/ticket`).  
-`POST /api/tickets` → **405 Method Not Allowed**.
+`POST /api/tickets` → **405 Method Not Allowed**.  
+**Auth:** Bearer session; create-from-alert requires **`tickets` write** (domain `tickets` in the permission catalog).
 
 | Method | Path |
 |--------|------|

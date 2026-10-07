@@ -16,6 +16,14 @@ import {
 import { runRetentionIfDue } from '../src/database/retention';
 import { buildBurstHex, firstRecord, ingestBurst } from './ingest-helpers';
 
+async function adminHeaders(app: INestApplication) {
+  const logged = await request(app.getHttpServer())
+    .post('/users/login')
+    .send({ account: 'superadmin', password: 'superadmin' });
+  expect(logged.status).toBe(200);
+  return { Authorization: `Bearer ${logged.body.session_id}` };
+}
+
 describe('API e2e (ported from test_api.py)', () => {
   let harness: TestApp;
   let app: INestApplication;
@@ -401,6 +409,7 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('explorer_and_alerts_accept_all_time_and_30_day_ranges', async () => {
+    const headers = await adminHeaders(app);
     const flags = encodeFlags({ sos: true, strap: true });
     const posted = await ingestBurst(app, {
       soldier_id: 5151,
@@ -414,9 +423,15 @@ describe('API e2e (ported from test_api.py)', () => {
         .time_ranges,
     ).toEqual(['all', '30d']);
     expect(
-      (await request(app.getHttpServer()).get('/api/alerts/filters/options')).body
-        .time_ranges,
+      (
+        await request(app.getHttpServer())
+          .get('/api/alerts/filters/options')
+          .set(headers)
+      ).body.time_ranges,
     ).toEqual(['all', '30d']);
+    expect(
+      (await request(app.getHttpServer()).get('/api/alerts/filters/options')).status,
+    ).toBe(401);
 
     const params = { soldier_id: 5151 };
     expect(
@@ -456,6 +471,7 @@ describe('API e2e (ported from test_api.py)', () => {
       (
         await request(app.getHttpServer())
           .get('/api/alerts')
+          .set(headers)
           .query({ ...params, timeRange: 'all' })
       ).body.total,
     ).toBeGreaterThanOrEqual(1);
@@ -463,6 +479,7 @@ describe('API e2e (ported from test_api.py)', () => {
       (
         await request(app.getHttpServer())
           .get('/api/alerts')
+          .set(headers)
           .query({ ...params, timeRange: '30days' })
       ).body.total,
     ).toBe(0);
@@ -470,15 +487,18 @@ describe('API e2e (ported from test_api.py)', () => {
       (
         await request(app.getHttpServer())
           .get('/api/alerts/summary')
+          .set(headers)
           .query({ ...params, timeRange: '30d' })
       ).body.total,
     ).toBe(0);
   });
 
   it('sos_opens_alert_and_stays_in_explorer', async () => {
+    const headers = await adminHeaders(app);
     const seeded = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ alert_type: 'SOS', soldier_id: 104, status: 'ACTIVE' })
     ).body;
     expect(seeded.total).toBeGreaterThanOrEqual(1);
@@ -515,6 +535,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const alerts = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 5150, alert_type: 'SOS' })
     ).body;
     expect(alerts.total).toBe(1);
@@ -524,6 +545,7 @@ describe('API e2e (ported from test_api.py)', () => {
     ).toBe(explorerBefore + 1);
     const exported = await request(app.getHttpServer())
       .get('/api/alerts/export.csv')
+      .set(headers)
       .query({ alert_type: 'SOS' });
     expect(exported.status).toBe(200);
     expect(exported.text).toContain(',SOS,');
@@ -566,10 +588,13 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('alert_seed_distribution', async () => {
-    const summary = (await request(app.getHttpServer()).get('/api/alerts/summary'))
-      .body;
+    const headers = await adminHeaders(app);
+    const summary = (
+      await request(app.getHttpServer()).get('/api/alerts/summary').set(headers)
+    ).body;
     // Alerts are derived from seeded TELEMETRY flags / gaps via raiseAlerts (no orphan seed).
     expect(summary.total).toBeGreaterThan(0);
+    expect(summary.timeline_bucket).toBe('1h');
     const kinds = Object.fromEntries(
       summary.by_type.map((item: any) => [item.alert_type, item.count]),
     );
@@ -593,7 +618,9 @@ describe('API e2e (ported from test_api.py)', () => {
     ).n;
     expect(orphans).toBe(0);
 
-    const sos = (await request(app.getHttpServer()).get('/api/alerts/sos')).body;
+    const sos = (
+      await request(app.getHttpServer()).get('/api/alerts/sos').set(headers)
+    ).body;
     expect(sos.total).toBeGreaterThanOrEqual(1);
     expect(sos.items[0].soldier_id).toBe(104);
     expect(sos.items[0].source_record_id).not.toBeNull();
@@ -606,10 +633,19 @@ describe('API e2e (ported from test_api.py)', () => {
     expect(sosTelemetry.total).toBeGreaterThan(0);
 
     const options = (
-      await request(app.getHttpServer()).get('/api/alerts/filters/options')
+      await request(app.getHttpServer())
+        .get('/api/alerts/filters/options')
+        .set(headers)
     ).body;
     expect(options.alert_types).toContain('SOS');
     expect(options.severities).toContain('CRITICAL');
+    const daySummary = (
+      await request(app.getHttpServer())
+        .get('/api/alerts/summary')
+        .set(headers)
+        .query({ timeRange: '30d' })
+    ).body;
+    expect(daySummary.timeline_bucket).toBe('1d');
     const schema = (await request(app.getHttpServer()).get('/openapi.json')).body;
     expect(schema.paths).toHaveProperty('/api/alerts/sos');
     expect(schema.paths).toHaveProperty('/api/alerts/{alert_id}/acknowledge');
@@ -620,6 +656,7 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('arrhythmia_episode_does_not_duplicate', async () => {
+    const headers = await adminHeaders(app);
     const post = async (minute: number, active: boolean) => {
       const flags = encodeFlags({ arrhythmia: active, strap: true });
       const response = await ingestBurst(
@@ -647,6 +684,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const page = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 8800, alert_type: 'ARRHYTHMIA' })
     ).body;
     expect(page.total).toBe(1);
@@ -661,6 +699,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const cleared = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 8800, alert_type: 'ARRHYTHMIA' })
     ).body;
     expect(cleared.total).toBe(1);
@@ -670,6 +709,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const reopened = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 8800, alert_type: 'ARRHYTHMIA' })
     ).body;
     expect(reopened.total).toBe(2);
@@ -678,36 +718,49 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('acknowledge_and_resolve', async () => {
+    const headers = await adminHeaders(app);
+    expect(
+      (await request(app.getHttpServer()).get('/api/alerts')).status,
+    ).toBe(401);
     const alertId = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ alert_type: 'CASUALTY' })
     ).body.items[0].id;
+    expect(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/alerts/${alertId}/acknowledge`)
+          .send({ by: 'medic-1' })
+      ).status,
+    ).toBe(401);
     const acknowledged = await request(app.getHttpServer())
       .post(`/api/alerts/${alertId}/acknowledge`)
-      .send({ by: 'medic-1' });
+      .set(headers);
     expect(acknowledged.status).toBe(200);
     expect(acknowledged.body.status).toBe('ACKNOWLEDGED');
-    expect(acknowledged.body.acknowledged_by).toBe('medic-1');
+    expect(acknowledged.body.acknowledged_by).toBe('Superadmin');
     const resolved = await request(app.getHttpServer())
       .post(`/api/alerts/${alertId}/resolve`)
-      .send({ by: 'medic-1' });
+      .set(headers);
     expect(resolved.status).toBe(200);
     expect(resolved.body.status).toBe('RESOLVED');
-    expect(resolved.body.resolved_by).toBe('medic-1');
+    expect(resolved.body.resolved_by).toBe('Superadmin');
     expect(
       (
         await request(app.getHttpServer())
           .post(`/api/alerts/${alertId}/resolve`)
-          .send({ by: 'medic-1' })
+          .set(headers)
       ).status,
     ).toBe(409);
   });
 
-  it('no_contact_resolves_when_telemetry_returns', async () => {
+  it('no_contact_cleared_when_telemetry_returns', async () => {
+    const headers = await adminHeaders(app);
     const flags = encodeFlags({ strap: true });
     // Use timestamps at/after seed end so global MAX(event_time) does not
-    // immediately re-open NO_CONTACT after resolve.
+    // immediately re-open NO_CONTACT after CLEARED.
     const early = await ingestBurst(app, {
       soldier_id: 301,
       seq: 1,
@@ -722,6 +775,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const before = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 301, alert_type: 'NO_CONTACT', status: 'ACTIVE' })
     ).body;
     expect(before.total).toBeGreaterThanOrEqual(1);
@@ -742,25 +796,35 @@ describe('API e2e (ported from test_api.py)', () => {
     const active = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({ soldier_id: 301, alert_type: 'NO_CONTACT', status: 'ACTIVE' })
     ).body;
     expect(active.total).toBe(0);
-    const resolved = (
+    const cleared = (
       await request(app.getHttpServer())
         .get('/api/alerts')
+        .set(headers)
         .query({
           soldier_id: 301,
           alert_type: 'NO_CONTACT',
-          status: 'RESOLVED',
+          status: 'CLEARED',
         })
     ).body;
-    expect(resolved.total).toBeGreaterThanOrEqual(1);
-    expect(resolved.items[0].resolved_by).toBe('engine');
+    expect(cleared.total).toBeGreaterThanOrEqual(1);
+    expect(cleared.items[0].resolved_by).toBeNull();
   });
 
   it('history_reads_explorer_without_double_counting', async () => {
-    // 30s cadence: 08:00:00 .. 08:30:00 inclusive = 61 samples.
+    // 30s cadence: 08:00:00 .. 08:30:00 inclusive = 61 TELEMETRY samples.
     const expectedHalfHour = 61;
+    const headers = await adminHeaders(app);
+    expect(
+      (await request(app.getHttpServer()).get('/api/history/summary').query({
+        scope: 'SOLDIER',
+        soldier_id: 104,
+      })).status,
+    ).toBe(401);
+
     const params = {
       scope: 'SOLDIER',
       soldier_id: 104,
@@ -769,27 +833,37 @@ describe('API e2e (ported from test_api.py)', () => {
     };
     const summary = await request(app.getHttpServer())
       .get('/api/history/summary')
+      .set(headers)
       .query(params);
     expect(summary.status).toBe(200);
     const cards = summary.body.cards;
     expect(cards.total_records).toBe(expectedHalfHour);
+    expect(cards.telemetry_count).toBe(expectedHalfHour);
     expect(cards.distance_is_derived).toBe(true);
     expect(cards.total_distance_km).toBeGreaterThan(0);
     expect(cards.heart_rate_avg_bpm).not.toBeNull();
     expect(cards.battery_avg_percent).not.toBeNull();
 
+    // Default without history_data_type is TELEMETRY-only.
     const telemetry = (
       await request(app.getHttpServer())
         .get('/api/history')
-        .query({ ...params, history_data_type: 'TELEMETRY', limit: 500 })
+        .set(headers)
+        .query({ ...params, limit: 500 })
     ).body;
     expect(telemetry.total).toBe(expectedHalfHour);
     expect(new Set(telemetry.items.map((item: any) => item.data_type))).toEqual(
       new Set(['TELEMETRY']),
     );
+    expect(new Set(telemetry.items.map((item: any) => item.category))).toEqual(
+      new Set(['TELEMETRY']),
+    );
 
     const track = (
-      await request(app.getHttpServer()).get('/api/history/track').query(params)
+      await request(app.getHttpServer())
+        .get('/api/history/track')
+        .set(headers)
+        .query(params)
     ).body.points;
     expect(track.length).toBe(expectedHalfHour);
     expect(track.map((point: any) => point.event_time)).toEqual(
@@ -799,46 +873,65 @@ describe('API e2e (ported from test_api.py)', () => {
     const gnss = (
       await request(app.getHttpServer())
         .get('/api/history/track')
+        .set(headers)
         .query({ ...params, position_source: 'GNSS' })
     ).body.points;
     expect(gnss.length).toBeGreaterThan(0);
     expect(gnss.length).toBeLessThanOrEqual(track.length);
 
-    const detail = await request(app.getHttpServer()).get(
-      `/api/history/point/${track[0].source_id}`,
-    );
+    const detail = await request(app.getHttpServer())
+      .get(`/api/history/point/${track[0].source_id}`)
+      .set(headers);
     expect(detail.status).toBe(200);
     expect(detail.body.id).toBe(`R-${track[0].source_id}`);
     expect(detail.body.details.vitals.hr).not.toBeNull();
     expect(detail.body.details.raw_data.raw_bytes_length).toBe(21);
+    expect(detail.body.details.packet_reference).toBeDefined();
+    expect(detail.body.details.communication).toBeUndefined();
     expect(
-      (await request(app.getHttpServer()).get('/api/history/point/999999')).status,
+      (
+        await request(app.getHttpServer())
+          .get('/api/history/point/999999')
+          .set(headers)
+      ).status,
     ).toBe(404);
 
     const charts = (
-      await request(app.getHttpServer()).get('/api/history/charts').query(params)
+      await request(app.getHttpServer())
+        .get('/api/history/charts')
+        .set(headers)
+        .query(params)
     ).body.buckets;
     expect(charts.length).toBeGreaterThan(0);
     expect(charts[0].samples).toBeGreaterThan(0);
 
     const stats = (
-      await request(app.getHttpServer()).get('/api/history/statistics').query(params)
+      await request(app.getHttpServer())
+        .get('/api/history/statistics')
+        .set(headers)
+        .query(params)
     ).body;
+    expect(stats.telemetry_count).toBe(expectedHalfHour);
     expect(stats.position_points).toBe(expectedHalfHour);
     expect(stats.soldiers).toBe(1);
+    expect(stats.by_soldier).toEqual([{ soldier_id: 104, count: expectedHalfHour }]);
+    expect(stats.by_data_type).toBeUndefined();
 
     const options = (
       await request(app.getHttpServer())
         .get('/api/history/filters/options')
+        .set(headers)
         .query(params)
     ).body;
-    expect(options.data_types).toContain('TELEMETRY');
+    expect(options.data_types).toEqual(['TELEMETRY']);
     expect(options.position_sources).toContain('GNSS');
     expect(options.time_ranges).toEqual(['all', '30d']);
+    expect(options.gateways).toBeUndefined();
     expect(
       (
         await request(app.getHttpServer())
           .get('/api/history/summary')
+          .set(headers)
           .query({ ...params, timeRange: 'all' })
       ).body.cards.total_records,
     ).toBe(expectedHalfHour);
@@ -846,23 +939,30 @@ describe('API e2e (ported from test_api.py)', () => {
       (
         await request(app.getHttpServer())
           .get('/api/history')
+          .set(headers)
           .query({ scope: 'GROUP', group_id: 'Alpha', timeRange: '90d' })
       ).status,
     ).toBe(400);
 
     const exported = await request(app.getHttpServer())
       .get('/api/history/export.csv')
-      .query({ ...params, history_data_type: 'UPLINK' });
+      .set(headers)
+      .query(params);
     expect(exported.status).toBe(200);
     expect(exported.headers['content-type']).toContain('text/csv');
 
     expect(
-      (await request(app.getHttpServer()).get('/api/history/summary').query({ scope: 'SOLDIER' }))
-        .status,
+      (
+        await request(app.getHttpServer())
+          .get('/api/history/summary')
+          .set(headers)
+          .query({ scope: 'SOLDIER' })
+      ).status,
     ).toBe(400);
     const group = (
       await request(app.getHttpServer())
         .get('/api/history/summary')
+        .set(headers)
         .query({ scope: 'GROUP', group_id: 'Alpha' })
     ).body;
     // Seed telemetry has no group enrichment (groups are not seeded).
@@ -935,7 +1035,7 @@ describe('API e2e (ported from test_api.py)', () => {
     expect(seeded.body.username).toBe('superadmin');
     expect(seeded.body.status).toBe('ACTIVE');
     expect(seeded.body.access.role).toBe('superadmin');
-    expect(seeded.body.access.permissions.length).toBe(30);
+    expect(seeded.body.access.permissions.length).toBe(32);
     const summary = (await request(app.getHttpServer()).get('/users/summary')).body;
     expect(summary.total_humans).toBe(1);
     expect(summary.active_humans).toBe(1);
@@ -1093,10 +1193,12 @@ describe('API e2e (ported from test_api.py)', () => {
       (await request(app.getHttpServer()).get(`/roles/${custom.body.id}/detail`))
         .status,
     ).toBe(404);
+    const histHeaders = await adminHeaders(app);
     expect(
       (
         await request(app.getHttpServer())
           .get('/api/history/summary')
+          .set(histHeaders)
           .query({ scope: 'GROUP', group_id: 'Alpha' })
       ).status,
     ).toBe(200);
