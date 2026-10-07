@@ -1,33 +1,33 @@
 import type { Database } from 'better-sqlite3';
 import { bind } from '../common/sql';
+import { utcNow } from '../common/records';
+import {
+  groupMemberCount,
+  setGroupMembers,
+} from '../database/personnel';
 
 export class OperationRepository {
   constructor(private readonly db: Database) {}
 
   syncGroups() {
-    const rows = this.db
-      .prepare(
-        `SELECT DISTINCT group_id AS name FROM explorer_records
-         WHERE group_id IS NOT NULL AND group_id != ''`,
-      )
-      .all() as any[];
-    const insert = this.db.prepare(
-      "INSERT OR IGNORE INTO groups (name, status) VALUES (?, 'ACTIVE')",
-    );
-    for (const row of rows) insert.run(row.name);
+    // no-op — groups are master data
   }
 
   groups() {
-    this.syncGroups();
     return this.db
-      .prepare('SELECT id, name, status FROM groups ORDER BY name COLLATE NOCASE')
+      .prepare(
+        `SELECT id, name, description, leader_soldier_id, status, created_at, updated_at
+         FROM groups WHERE status = 'ACTIVE' ORDER BY name COLLATE NOCASE`,
+      )
       .all() as any[];
   }
 
   getGroup(groupId: number) {
-    this.syncGroups();
     return this.db
-      .prepare('SELECT id, name, status FROM groups WHERE id = ?')
+      .prepare(
+        `SELECT id, name, description, leader_soldier_id, status, created_at, updated_at
+         FROM groups WHERE id = ?`,
+      )
       .get(groupId) as any;
   }
 
@@ -105,7 +105,8 @@ export class OperationRepository {
   linkedGroups(operationId: number) {
     return this.db
       .prepare(
-        `SELECT g.id, g.name, g.status FROM operation_groups og
+        `SELECT g.id, g.name, g.description, g.leader_soldier_id, g.status
+         FROM operation_groups og
          JOIN groups g ON g.id = og.group_id
          WHERE og.operation_id = ? ORDER BY g.name COLLATE NOCASE`,
       )
@@ -115,7 +116,8 @@ export class OperationRepository {
   linkedGeofences(operationId: number) {
     return this.db
       .prepare(
-        `SELECT f.id, f.name, f.polygon_json, f.status FROM operation_geofences og
+        `SELECT f.id, f.name, f.polygon_json, f.status, f.kind, f.color, f.area_km2, f.description
+         FROM operation_geofences og
          JOIN geofences f ON f.id = og.geofence_id
          WHERE og.operation_id = ? ORDER BY f.name COLLATE NOCASE`,
       )
@@ -188,29 +190,165 @@ export class OperationRepository {
     );
   }
 
+  createGroup(input: {
+    name: string;
+    description?: string | null;
+    leaderSoldierId?: number | null;
+    memberSoldierIds: number[];
+  }): number {
+    const now = utcNow();
+    const info = this.db
+      .prepare(
+        `INSERT INTO groups (name, description, leader_soldier_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
+      )
+      .run(
+        ...bind([
+          input.name,
+          input.description ?? null,
+          input.leaderSoldierId ?? input.memberSoldierIds[0] ?? null,
+          now,
+          now,
+        ]),
+      );
+    const groupId = Number(info.lastInsertRowid);
+    setGroupMembers(
+      this.db,
+      groupId,
+      input.memberSoldierIds,
+      input.leaderSoldierId ?? null,
+    );
+    return groupId;
+  }
+
+  createGeofence(input: {
+    name: string;
+    description?: string | null;
+    kind?: string | null;
+    color?: string | null;
+    polygon: number[][];
+    areaKm2: number;
+  }): number {
+    const now = utcNow();
+    const info = this.db
+      .prepare(
+        `INSERT INTO geofences
+         (name, description, type, status, groups_json, polygon_json, area_km2, created_at, kind, color)
+         VALUES (?, ?, 'silent', 'active', '[]', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ...bind([
+          input.name,
+          input.description ?? '',
+          JSON.stringify(input.polygon),
+          input.areaKm2,
+          now,
+          input.kind ?? null,
+          input.color ?? null,
+        ]),
+      );
+    return Number(info.lastInsertRowid);
+  }
+
+  memberCount(groupId: number) {
+    return groupMemberCount(this.db, groupId);
+  }
+
+  /** Personnel via group_members (preferred) with personnel fallback. */
   personnel(groupNames: string[]) {
     if (!groupNames.length) return [];
     const marks = groupNames.map(() => '?').join(', ');
+    const fromMembers = this.db
+      .prepare(
+        `SELECT gm.soldier_id, g.name AS group_id, p.name AS soldier_name, g.id AS group_pk
+         FROM group_members gm
+         JOIN groups g ON g.id = gm.group_id
+         LEFT JOIN personnel p ON p.soldier_id = gm.soldier_id
+         WHERE g.name IN (${marks})
+         ORDER BY g.name COLLATE NOCASE, gm.soldier_id`,
+      )
+      .all(...groupNames) as any[];
+    if (fromMembers.length) return fromMembers;
     return this.db
       .prepare(
-        `SELECT DISTINCT soldier_id, group_id FROM explorer_records
-         WHERE is_sos = 0 AND soldier_id IS NOT NULL AND group_id IN (${marks})
-         ORDER BY group_id COLLATE NOCASE, soldier_id`,
+        `SELECT p.soldier_id, g.name AS group_id, p.name AS soldier_name, g.id AS group_pk
+         FROM personnel p
+         JOIN groups g ON g.id = p.group_id
+         WHERE p.status = 'ACTIVE' AND g.name IN (${marks})
+         ORDER BY g.name COLLATE NOCASE, p.soldier_id`,
       )
       .all(...groupNames) as any[];
   }
 
-  latestPosition(soldierId: number, groupName: string) {
+  personnelOptions(q?: string) {
+    const needle = q?.trim() ? `%${q.trim()}%` : null;
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          p.soldier_id,
+          p.name,
+          p.group_id,
+          g.name AS group_name,
+          g.leader_soldier_id,
+          (
+            SELECT er.event_time FROM explorer_records er
+            WHERE er.is_sos = 0 AND er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
+            ORDER BY er.event_time DESC, er.id DESC LIMIT 1
+          ) AS last_seen,
+          (
+            SELECT er.data_json FROM explorer_records er
+            WHERE er.is_sos = 0 AND er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
+            ORDER BY er.event_time DESC, er.id DESC LIMIT 1
+          ) AS data_json
+        FROM personnel p
+        LEFT JOIN groups g ON g.id = p.group_id
+        WHERE p.status = 'ACTIVE'
+          ${needle ? 'AND (p.name LIKE ? OR CAST(p.soldier_id AS TEXT) LIKE ?)' : ''}
+        ORDER BY p.soldier_id ASC
+        `,
+      )
+      .all(...(needle ? [needle, needle] : [])) as any[];
+    return rows.map((row) => {
+      let lat: number | null = null;
+      let lon: number | null = null;
+      if (row.data_json) {
+        try {
+          const data = JSON.parse(row.data_json);
+          lat = data.lat ?? null;
+          lon = data.lon ?? null;
+        } catch {
+          /* ignore */
+        }
+      }
+      return {
+        soldier_id: row.soldier_id,
+        name: row.name,
+        group_id: row.group_id,
+        group_name: row.group_name,
+        access_group: row.group_name ?? 'UNASSIGNED',
+        last_seen: row.last_seen,
+        lat,
+        lon,
+      };
+    });
+  }
+
+  latestPosition(soldierId: number, _groupName?: string) {
     return this.db
       .prepare(
         `SELECT event_time, data_json FROM explorer_records
-         WHERE is_sos = 0 AND category = 'TELEMETRY' AND soldier_id = ? AND group_id = ?
+         WHERE is_sos = 0 AND category = 'TELEMETRY' AND soldier_id = ?
          ORDER BY event_time DESC, id DESC LIMIT 1`,
       )
-      .get(soldierId, groupName) as any;
+      .get(soldierId) as any;
   }
 
-  alertsFor(groupNames: string[], soldierIds: number[]) {
+  alertsFor(
+    groupNames: string[],
+    soldierIds: number[],
+    window?: { startAt?: string; endAt?: string },
+  ) {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (groupNames.length) {
@@ -222,12 +360,17 @@ export class OperationRepository {
       params.push(...soldierIds);
     }
     if (!clauses.length) return [];
-    return this.db
-      .prepare(
-        `SELECT * FROM alerts WHERE ${clauses.join(' OR ')}
-         ORDER BY event_time DESC, id DESC`,
-      )
-      .all(...bind(params)) as any[];
+    let sql = `SELECT * FROM alerts WHERE (${clauses.join(' OR ')})`;
+    if (window?.startAt) {
+      sql += ' AND event_time >= ?';
+      params.push(window.startAt);
+    }
+    if (window?.endAt) {
+      sql += ' AND event_time <= ?';
+      params.push(window.endAt);
+    }
+    sql += ' ORDER BY event_time DESC, id DESC';
+    return this.db.prepare(sql).all(...bind(params)) as any[];
   }
 
   ticketsForAlerts(alertIds: number[]) {

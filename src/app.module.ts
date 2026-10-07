@@ -6,6 +6,7 @@ import { ExplorerModule } from './explorer/explorer.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { HistoryModule } from './history/history.module';
 import { GeofencesModule } from './geofences/geofences.module';
+import { PersonnelModule } from './personnel/personnel.module';
 import { UsersModule } from './users/users.module';
 import { ProfileModule } from './profile/profile.module';
 import { RolesModule } from './roles/roles.module';
@@ -23,6 +24,7 @@ import { OperationsModule } from './operations/operations.module';
     AlertsModule,
     HistoryModule,
     GeofencesModule,
+    PersonnelModule,
     UsersModule,
     ProfileModule,
     RolesModule,

@@ -6,6 +6,7 @@ import { bind } from '../common/sql';
 import { seedExplorer } from './seed-explorer';
 import { seedAlerts } from './alert-rules';
 import { seedAccess } from './access';
+import { seedPersonnelMaster } from './personnel';
 
 export const CATEGORIES = [
   'TELEMETRY',
@@ -156,14 +157,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ON explorer_records (is_sos, category, data_type);
     `);
 
-    const count = (
-      conn.prepare('SELECT COUNT(*) AS n FROM explorer_records').get() as {
-        n: number;
-      }
-    ).n;
-    if (count === 0 && process.env.TRACKFORGE_SEED !== '0') {
-      seedExplorer(conn);
-    }
+    // Personnel master is seeded after groups table exists (below). Explorer seed
+    // runs later once groups + personnel masters are ready.
 
     const existingAlerts = conn
       .prepare(
@@ -216,22 +211,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_alerts_list
         ON alerts (event_time, id);
     `);
-
-    const alertCount = (
-      conn.prepare('SELECT COUNT(*) AS n FROM alerts').get() as { n: number }
-    ).n;
-    const explorerCount = (
-      conn.prepare('SELECT COUNT(*) AS n FROM explorer_records').get() as {
-        n: number;
-      }
-    ).n;
-    if (
-      alertCount === 0 &&
-      explorerCount &&
-      process.env.TRACKFORGE_SEED !== '0'
-    ) {
-      seedAlerts(conn);
-    }
 
     conn.exec(`
       CREATE TABLE IF NOT EXISTS geofences (
@@ -417,13 +396,40 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE TABLE IF NOT EXISTS groups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL DEFAULT 'ACTIVE'
+        description TEXT,
+        leader_soldier_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_at TEXT,
+        updated_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS personnel (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        soldier_id INTEGER NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        group_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'ACTIVE'
+          CHECK (status IN ('ACTIVE', 'INACTIVE')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (group_id) REFERENCES groups(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_personnel_group
+        ON personnel (group_id, soldier_id);
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_id INTEGER NOT NULL,
+        soldier_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (group_id, soldier_id),
+        FOREIGN KEY (group_id) REFERENCES groups(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_group_members_soldier
+        ON group_members (soldier_id);
       CREATE TABLE IF NOT EXISTS operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_code TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         description TEXT,
+        type TEXT,
         status TEXT NOT NULL
           CHECK (status IN ('PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED')),
         start_at TEXT NOT NULL,
@@ -450,6 +456,72 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         FOREIGN KEY (geofence_id) REFERENCES geofences(id)
       );
     `);
+
+    const groupColumns = new Set(
+      (conn.prepare('PRAGMA table_info(groups)').all() as { name: string }[]).map(
+        (r) => r.name,
+      ),
+    );
+    if (!groupColumns.has('description')) {
+      conn.exec('ALTER TABLE groups ADD COLUMN description TEXT');
+    }
+    if (!groupColumns.has('leader_soldier_id')) {
+      conn.exec('ALTER TABLE groups ADD COLUMN leader_soldier_id INTEGER');
+    }
+    if (!groupColumns.has('created_at')) {
+      conn.exec('ALTER TABLE groups ADD COLUMN created_at TEXT');
+    }
+    if (!groupColumns.has('updated_at')) {
+      conn.exec('ALTER TABLE groups ADD COLUMN updated_at TEXT');
+    }
+
+    const operationColumns = new Set(
+      (
+        conn.prepare('PRAGMA table_info(operations)').all() as { name: string }[]
+      ).map((r) => r.name),
+    );
+    if (!operationColumns.has('type')) {
+      conn.exec('ALTER TABLE operations ADD COLUMN type TEXT');
+    }
+
+    const geofenceColumns = new Set(
+      (
+        conn.prepare('PRAGMA table_info(geofences)').all() as { name: string }[]
+      ).map((r) => r.name),
+    );
+    if (!geofenceColumns.has('kind')) {
+      conn.exec('ALTER TABLE geofences ADD COLUMN kind TEXT');
+    }
+    if (!geofenceColumns.has('color')) {
+      conn.exec('ALTER TABLE geofences ADD COLUMN color TEXT');
+    }
+
+    seedPersonnelMaster(conn);
+
+    const explorerCount = (
+      conn.prepare('SELECT COUNT(*) AS n FROM explorer_records').get() as {
+        n: number;
+      }
+    ).n;
+    if (explorerCount === 0 && process.env.TRACKFORGE_SEED !== '0') {
+      seedExplorer(conn);
+    }
+
+    const alertCount = (
+      conn.prepare('SELECT COUNT(*) AS n FROM alerts').get() as { n: number }
+    ).n;
+    const explorerAfter = (
+      conn.prepare('SELECT COUNT(*) AS n FROM explorer_records').get() as {
+        n: number;
+      }
+    ).n;
+    if (
+      alertCount === 0 &&
+      explorerAfter &&
+      process.env.TRACKFORGE_SEED !== '0'
+    ) {
+      seedAlerts(conn);
+    }
 
     seedAccess(conn);
   }

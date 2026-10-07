@@ -13,6 +13,7 @@ export { TicketCollaborator } from './ticket-collaborator.entity';
 export { TicketTask } from './ticket-task.entity';
 export { TicketUpdate } from './ticket-update.entity';
 export { Group } from './group.entity';
+export { Personnel } from './personnel.entity';
 export { Operation } from './operation.entity';
 export { OperationGroup } from './operation-group.entity';
 export { OperationGeofence } from './operation-geofence.entity';

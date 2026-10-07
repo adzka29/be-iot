@@ -21,10 +21,16 @@ import {
   telemetryData,
   utcNow,
 } from '../common/records';
+import { resolveGroupName } from '../database/personnel';
 
 @Controller('api/ingest')
 export class IngestController {
   constructor(private readonly db: DatabaseService) {}
+
+  /** Organizational group is enriched from Personnel master — not from wire packet. */
+  private enrichGroup(soldierId?: number | null): string | null {
+    return resolveGroupName(this.db.connection, soldierId ?? null);
+  }
 
   private clock(value: number | string): [string, number] {
     try {
@@ -117,7 +123,7 @@ export class IngestController {
         entity_type: 'SOLDIER',
         entity_id: String(body.soldier_id),
         soldier_id: body.soldier_id,
-        group_id: body.group_id,
+        group_id: this.enrichGroup(body.soldier_id),
         gateway_id: body.gateway_id,
         event_time: eventTime,
         received_at: this.received(body.received_at),
@@ -169,7 +175,7 @@ export class IngestController {
         entity_type: 'SOLDIER',
         entity_id: String(payload.soldier_id),
         soldier_id: payload.soldier_id,
-        group_id: body.group_id,
+        group_id: this.enrichGroup(payload.soldier_id),
         gateway_id: body.gateway_id,
         event_time: this.clock(String(payload.timestamp))[0],
         received_at: this.received(body.received_at),
@@ -281,7 +287,7 @@ export class IngestController {
         entity_type: 'SOLDIER',
         entity_id: String(body.soldier_id),
         soldier_id: body.soldier_id,
-        group_id: body.group_id,
+        group_id: this.enrichGroup(body.soldier_id),
         gateway_id: body.gateway_id,
         event_time: eventTime,
         received_at: this.received(body.received_at),
@@ -316,7 +322,7 @@ export class IngestController {
         entity_type: body.entity_type,
         entity_id: body.entity_id,
         soldier_id: soldierId,
-        group_id: body.group_id,
+        group_id: this.enrichGroup(soldierId),
         gateway_id: body.gateway_id,
         event_time: eventTime,
         received_at: this.received(body.received_at),

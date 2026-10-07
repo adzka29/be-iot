@@ -16,8 +16,10 @@ import {
 } from '../common/audit';
 import { canonicalTime, utcNow } from '../common/records';
 import { OperationRepository, positionOf } from './operations.repository';
+import { normalizeSoldierId } from '../database/personnel';
 
 const STATUSES = ['PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED'] as const;
+const DELETABLE = new Set(['PLANNING', 'COMPLETED', 'CANCELLED']);
 
 @Injectable()
 export class OperationsService {
@@ -75,43 +77,78 @@ export class OperationsService {
     return { items: repo.groups().map((row) => this.groupChoice(repo, row)) };
   }
 
+  personnelOptions(request: Request, q?: string) {
+    const conn = this.db();
+    this.reader(conn, request);
+    return { items: new OperationRepository(conn).personnelOptions(q) };
+  }
+
   create(request: Request, body: any) {
     const allowed = new Set([
       'name',
       'description',
       'start_at',
       'end_at',
+      'type',
       'group_ids',
+      'groups',
       'geofence_ids',
+      'new_geofences',
     ]);
     const extra = Object.keys(body || {}).filter((key) => !allowed.has(key));
     if (extra.length) {
       throw new HttpException(`unexpected fields: ${extra.sort().join(', ')}`, 422);
     }
     const name = this.name(body.name);
+    if (name.length > 160) throw new HttpException('name is too long', 422);
     const description = this.optional(body.description);
+    if (description && description.length > 2000) {
+      throw new HttpException('description is too long', 422);
+    }
+    const opType = this.optional(body.type);
     const [startAt, endAt] = this.window(body.start_at, body.end_at);
     const conn = this.db();
     const user = this.writer(conn, request);
     const repo = new OperationRepository(conn);
-    const groupIds = this.resolveGroups(repo, body.group_ids || []);
-    const geofenceIds = this.resolveGeofences(repo, body.geofence_ids || []);
-    const now = utcNow();
-    const operationId = repo.insertOperation({
-      operation_code: repo.nextCode(now),
-      name,
-      description,
-      status: 'PLANNING',
-      start_at: startAt,
-      end_at: endAt,
-      created_by: user.id,
-      created_at: now,
-      updated_at: now,
-      completed_at: null,
-      deleted_at: null,
+
+    const run = conn.transaction(() => {
+      const existingGroupIds = this.resolveGroups(repo, body.group_ids || []);
+      const createdGroupIds: number[] = [];
+      for (const g of body.groups || []) {
+        createdGroupIds.push(this.createInlineGroup(repo, g));
+      }
+      const existingGeofenceIds = this.resolveGeofences(repo, body.geofence_ids || []);
+      const createdGeofenceIds: number[] = [];
+      for (const fence of body.new_geofences || []) {
+        createdGeofenceIds.push(this.createInlineGeofence(repo, fence));
+      }
+      const now = utcNow();
+      const operationId = repo.insertOperation({
+        operation_code: repo.nextCode(now),
+        name,
+        description,
+        type: opType,
+        status: 'PLANNING',
+        start_at: startAt,
+        end_at: endAt,
+        created_by: user.id,
+        created_at: now,
+        updated_at: now,
+        completed_at: null,
+        deleted_at: null,
+      });
+      for (const groupId of [...existingGroupIds, ...createdGroupIds]) {
+        if (!repo.hasGroup(operationId, groupId)) repo.linkGroup(operationId, groupId);
+      }
+      for (const geofenceId of [...existingGeofenceIds, ...createdGeofenceIds]) {
+        if (!repo.hasGeofence(operationId, geofenceId)) {
+          repo.linkGeofence(operationId, geofenceId);
+        }
+      }
+      return operationId;
     });
-    repo.replaceGroups(operationId, groupIds);
-    repo.replaceGeofences(operationId, geofenceIds);
+
+    const operationId = run();
     const operation = repo.getOperation(operationId);
     this.audit(conn, user, request, operation, 'OPERATION_CREATED', 'CREATE', 'Created an operation.');
     return this.detailPayload(conn, repo, operation);
@@ -130,6 +167,7 @@ export class OperationsService {
       'description',
       'start_at',
       'end_at',
+      'type',
       'group_ids',
       'geofence_ids',
     ]);
@@ -155,6 +193,7 @@ export class OperationsService {
     }
     if ('name' in fields) changes.name = this.name(fields.name);
     if ('description' in fields) changes.description = this.optional(fields.description);
+    if ('type' in fields) changes.type = this.optional(fields.type);
     if ('group_ids' in fields) {
       repo.replaceGroups(operationId, this.resolveGroups(repo, fields.group_ids || []));
     }
@@ -183,8 +222,11 @@ export class OperationsService {
     const user = this.writer(conn, request);
     const repo = new OperationRepository(conn);
     const operation = this.operation(repo, operationId);
-    if (operation.status !== 'PLANNING') {
-      throw new HttpException('only a planning operation can be deleted', 409);
+    if (!DELETABLE.has(operation.status)) {
+      throw new HttpException(
+        'Active/on-hold operations cannot be deleted; complete or cancel them first.',
+        409,
+      );
     }
     const now = utcNow();
     repo.updateOperation(operationId, { deleted_at: now, updated_at: now });
@@ -226,13 +268,21 @@ export class OperationsService {
     );
   }
 
-  addGroup(request: Request, operationId: number, groupId: number) {
+  addGroup(request: Request, operationId: number, body: any) {
     const conn = this.db();
     const user = this.writer(conn, request);
     const repo = new OperationRepository(conn);
     const operation = this.operation(repo, operationId);
-    if (repo.getGroup(groupId) == null) {
-      throw new HttpException('group not found', 404);
+    let groupId: number;
+    if (body?.group_id != null && body.group_id !== '') {
+      groupId = Number(body.group_id);
+      if (repo.getGroup(groupId) == null) {
+        throw new HttpException('group not found', 404);
+      }
+    } else if (body?.name && Array.isArray(body.member_soldier_ids)) {
+      groupId = this.createInlineGroup(repo, body);
+    } else {
+      throw new HttpException('group_id or new group payload required', 422);
     }
     if (repo.hasGroup(operationId, groupId)) {
       throw new HttpException('group is already assigned', 409);
@@ -260,13 +310,21 @@ export class OperationsService {
     return this.detailPayload(conn, repo, repo.getOperation(operationId));
   }
 
-  addGeofence(request: Request, operationId: number, geofenceId: number) {
+  addGeofence(request: Request, operationId: number, body: any) {
     const conn = this.db();
     const user = this.writer(conn, request);
     const repo = new OperationRepository(conn);
     const operation = this.operation(repo, operationId);
-    if (repo.getGeofence(geofenceId) == null) {
-      throw new HttpException('geofence not found', 404);
+    let geofenceId: number;
+    if (body?.geofence_id != null && body.geofence_id !== '') {
+      geofenceId = Number(body.geofence_id);
+      if (repo.getGeofence(geofenceId) == null) {
+        throw new HttpException('geofence not found', 404);
+      }
+    } else if (body?.name) {
+      geofenceId = this.createInlineGeofence(repo, body);
+    } else {
+      throw new HttpException('geofence_id or new geofence payload required', 422);
     }
     if (repo.hasGeofence(operationId, geofenceId)) {
       throw new HttpException('geofence is already assigned', 409);
@@ -541,6 +599,7 @@ export class OperationsService {
       operation_code: operation.operation_code,
       name: operation.name,
       description: operation.description,
+      type: operation.type ?? null,
       status: operation.status,
       start_at: operation.start_at,
       end_at: operation.end_at,
@@ -563,15 +622,27 @@ export class OperationsService {
       operation_code: operation.operation_code,
       name: operation.name,
       description: operation.description,
+      type: operation.type ?? null,
       status: operation.status,
       start_at: operation.start_at,
       end_at: operation.end_at,
       groups: groups.map((row) => this.groupRef(repo, row)),
-      geofences: geofences.map((row) => ({ id: row.id, name: row.name })),
+      geofences: geofences.map((row) => ({
+        id: row.id,
+        name: row.name,
+        kind: row.kind ?? null,
+        color: row.color ?? null,
+        area_km2: row.area_km2,
+      })),
       summary: {
         group_count: groups.length,
         personnel_count: this.personnelCount(repo, names),
         geofence_count: geofences.length,
+      },
+      counts: {
+        groups: groups.length,
+        personnel: this.personnelCount(repo, names),
+        geofences: geofences.length,
       },
       created_by: { id: creator.id, name: creator.name },
       created_at: operation.created_at,
@@ -582,22 +653,157 @@ export class OperationsService {
     return {
       id: row.id,
       name: row.name,
-      personnel_count: this.personnelCount(repo, [row.name]),
+      leader_soldier_id: row.leader_soldier_id ?? null,
+      personnel_count: repo.memberCount(row.id) || this.personnelCount(repo, [row.name]),
     };
   }
 
   private groupChoice(repo: OperationRepository, row: any) {
-    return { ...this.groupRef(repo, row), commander_name: null };
+    return {
+      ...this.groupRef(repo, row),
+      // Keep commander_name null until a dedicated commander name field exists.
+      commander_name: null,
+    };
   }
 
   private groupItem(repo: OperationRepository, row: any) {
     return {
       id: row.id,
       name: row.name,
-      commander: null,
-      personnel_count: this.personnelCount(repo, [row.name]),
+      leader_soldier_id: row.leader_soldier_id ?? null,
+      commander:
+        row.leader_soldier_id != null
+          ? { soldier_id: row.leader_soldier_id }
+          : null,
+      personnel_count: repo.memberCount(row.id) || this.personnelCount(repo, [row.name]),
       status: row.status,
     };
+  }
+
+  private createInlineGroup(repo: OperationRepository, g: any): number {
+    const name = this.name(g.name);
+    let members: number[];
+    try {
+      const normalized = (g.member_soldier_ids || []).map((id: unknown) =>
+        normalizeSoldierId(id),
+      ) as number[];
+      members = [...new Set(normalized)];
+    } catch (exc: any) {
+      throw new HttpException(String(exc.message || exc), 422);
+    }
+    if (!members.length) {
+      throw new HttpException('member_soldier_ids is required', 422);
+    }
+    let leader: number | null = null;
+    if (g.leader_soldier_id != null && g.leader_soldier_id !== '') {
+      try {
+        leader = normalizeSoldierId(g.leader_soldier_id);
+      } catch (exc: any) {
+        throw new HttpException(String(exc.message || exc), 422);
+      }
+      if (!members.includes(leader)) members.unshift(leader);
+    }
+    try {
+      return repo.createGroup({
+        name,
+        description: this.optional(g.description),
+        leaderSoldierId: leader,
+        memberSoldierIds: members,
+      });
+    } catch (exc: any) {
+      if (/UNIQUE/i.test(String(exc?.message))) {
+        throw new HttpException('group already exists', 409);
+      }
+      throw exc;
+    }
+  }
+
+  private createInlineGeofence(repo: OperationRepository, fence: any): number {
+    const name = this.name(fence.name);
+    const polygon = this.resolvePolygon(fence);
+    const area =
+      fence.area_km2 != null && Number.isFinite(Number(fence.area_km2))
+        ? Number(fence.area_km2)
+        : this.areaKm2(polygon);
+    return repo.createGeofence({
+      name,
+      description: this.optional(fence.description),
+      kind: this.optional(fence.kind),
+      color: this.optional(fence.color),
+      polygon,
+      areaKm2: area,
+    });
+  }
+
+  private resolvePolygon(fence: any): number[][] {
+    if (Array.isArray(fence.polygon)) {
+      return this.cleanPolygon(fence.polygon);
+    }
+    if (fence.geometry_json) {
+      let geometry: any;
+      try {
+        geometry =
+          typeof fence.geometry_json === 'string'
+            ? JSON.parse(fence.geometry_json)
+            : fence.geometry_json;
+      } catch {
+        throw new HttpException('geometry_json is invalid', 422);
+      }
+      const coords = geometry?.coordinates?.[0];
+      if (!Array.isArray(coords) || coords.length < 3) {
+        throw new HttpException('geometry_json must be a Polygon', 422);
+      }
+      // Drop closing ring point if present
+      const ring = [...coords];
+      if (
+        ring.length > 3 &&
+        ring[0][0] === ring[ring.length - 1][0] &&
+        ring[0][1] === ring[ring.length - 1][1]
+      ) {
+        ring.pop();
+      }
+      return this.cleanPolygon(ring);
+    }
+    throw new HttpException('polygon or geometry_json is required', 422);
+  }
+
+  private cleanPolygon(polygon: any[]): number[][] {
+    if (!Array.isArray(polygon) || polygon.length < 3) {
+      throw new HttpException('polygon must have at least 3 corners', 422);
+    }
+    // Existing geofences API historically required exactly 3; wizard may send more.
+    // Store first 3 for compatibility with current geofence consumers, or all if >3?
+    // Plan: accept >=3, store as-is for wizard (operations map reads polygon_json).
+    const points: number[][] = [];
+    for (const point of polygon) {
+      if (!Array.isArray(point) || point.length !== 2) {
+        throw new HttpException('each corner needs longitude and latitude', 422);
+      }
+      const lng = Number(point[0]);
+      const lat = Number(point[1]);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+        throw new HttpException('corner is not a number', 422);
+      }
+      if (lng < -180 || lng > 180 || lat < -90 || lat > 90) {
+        throw new HttpException('corner is outside the map', 422);
+      }
+      points.push([lng, lat]);
+    }
+    return points;
+  }
+
+  private areaKm2(points: number[][]): number {
+    let area = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const [lng, lat] = points[index];
+      const [nextLng, nextLat] = points[(index + 1) % points.length];
+      area += lng * nextLat - nextLng * lat;
+    }
+    area = Math.abs(area) / 2;
+    const meanLat = points.reduce((s, p) => s + p[1], 0) / points.length;
+    const kmLat = 111.32;
+    const kmLng = 111.32 * Math.cos((meanLat * Math.PI) / 180);
+    return Math.round(area * kmLat * kmLng * 10) / 10;
   }
 
   private personnelList(repo: OperationRepository, operationId: number) {

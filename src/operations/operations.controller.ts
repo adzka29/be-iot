@@ -46,6 +46,11 @@ export class OperationsController {
     return this.service.groupOptions(request);
   }
 
+  @Get('personnel/options')
+  personnelOptions(@Req() request: Request, @Query('q') q?: string) {
+    return this.service.personnelOptions(request, q);
+  }
+
   @Post()
   @HttpCode(201)
   create(@Body() body: any, @Req() request: Request) {
@@ -138,7 +143,7 @@ export class OperationsController {
     @Body() body: any,
     @Req() request: Request,
   ) {
-    return this.service.addGroup(request, operationId, body.group_id);
+    return this.service.addGroup(request, operationId, body);
   }
 
   @Delete(':operationId/groups/:groupId')
@@ -157,7 +162,7 @@ export class OperationsController {
     @Body() body: any,
     @Req() request: Request,
   ) {
-    return this.service.addGeofence(request, operationId, body.geofence_id);
+    return this.service.addGeofence(request, operationId, body);
   }
 
   @Delete(':operationId/geofences/:geofenceId')

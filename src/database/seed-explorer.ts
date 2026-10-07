@@ -2,6 +2,7 @@ import type { Database } from 'better-sqlite3';
 import { encodeFlags, packMeshFrame, packPayload } from '../mesh/frame';
 import { makeRecord, parseEventTime, telemetryData } from '../common/records';
 import { bind } from '../common/sql';
+import { resolveGroupName } from './personnel';
 
 const COLUMNS = [
   'category',
@@ -29,15 +30,16 @@ const COLUMNS = [
 
 const BASE = Date.UTC(2026, 9, 4, 8, 0, 0);
 
+/** Device-like coords only — group comes from Personnel master enrichment. */
 const SOLDIERS = [
-  { soldier_id: 101, group_id: 'Alpha', lat: -6.2011, lon: 106.8121 },
-  { soldier_id: 102, group_id: 'Alpha', lat: -6.2014, lon: 106.8124 },
-  { soldier_id: 103, group_id: 'Alpha', lat: -6.2017, lon: 106.8127 },
-  { soldier_id: 104, group_id: 'Alpha', lat: -6.202, lon: 106.813 },
-  { soldier_id: 105, group_id: 'Alpha', lat: -6.2023, lon: 106.8133 },
-  { soldier_id: 106, group_id: 'Alpha', lat: -6.2026, lon: 106.8136 },
-  { soldier_id: 107, group_id: 'Alpha', lat: -6.2029, lon: 106.8139 },
-  { soldier_id: 108, group_id: 'Alpha', lat: -6.2032, lon: 106.8142 },
+  { soldier_id: 101, lat: -6.2011, lon: 106.8121 },
+  { soldier_id: 102, lat: -6.2014, lon: 106.8124 },
+  { soldier_id: 103, lat: -6.2017, lon: 106.8127 },
+  { soldier_id: 104, lat: -6.202, lon: 106.813 },
+  { soldier_id: 105, lat: -6.2023, lon: 106.8133 },
+  { soldier_id: 106, lat: -6.2026, lon: 106.8136 },
+  { soldier_id: 107, lat: -6.2029, lon: 106.8139 },
+  { soldier_id: 108, lat: -6.2032, lon: 106.8142 },
 ];
 
 const POSITIONS = ['GNSS', 'DEAD_RECKONING', 'TRILATERATION', 'STALE'] as const;
@@ -66,6 +68,7 @@ export function seedExplorer(db: Database): void {
   for (let minute = 0; minute < 30; minute += 1) {
     for (let index = 0; index < SOLDIERS.length; index += 1) {
       const soldier = SOLDIERS[index];
+      const groupName = resolveGroupName(db, soldier.soldier_id);
       const eventMs = BASE + (minute * 60 + index) * 1000;
       const receivedMs = eventMs + 4000;
       const position =
@@ -126,7 +129,7 @@ export function seedExplorer(db: Database): void {
           entity_type: 'SOLDIER',
           entity_id: String(soldier.soldier_id),
           soldier_id: soldier.soldier_id,
-          group_id: soldier.group_id,
+          group_id: groupName,
           gateway_id: 'GW-01',
           event_time: eventTime,
           received_at: receivedAt,
@@ -152,7 +155,7 @@ export function seedExplorer(db: Database): void {
           entity_type: 'SOLDIER',
           entity_id: String(soldier.soldier_id),
           soldier_id: soldier.soldier_id,
-          group_id: soldier.group_id,
+          group_id: groupName,
           gateway_id: 'GW-01',
           event_time: eventTime,
           received_at: receivedAt,

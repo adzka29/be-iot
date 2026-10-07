@@ -326,4 +326,179 @@ describe('Operations e2e (ported from test_operations.py)', () => {
       (await request(app.getHttpServer()).get('/api/geofences')).body.items.length,
     ).toBeGreaterThan(0);
   });
+
+  it('wizard_creates_groups_and_geofences_in_one_transaction', async () => {
+    const admin = await login(app);
+    const alphaId = await alpha(app, admin);
+
+    const options = await request(app.getHttpServer())
+      .get('/api/operations/personnel/options')
+      .set(admin)
+      .query({ q: '103' });
+    expect(options.status).toBe(200);
+    expect(options.body.items.some((item: any) => item.soldier_id === 103)).toBe(
+      true,
+    );
+
+    const created = await request(app.getHttpServer())
+      .post('/api/operations')
+      .set(admin)
+      .send({
+        name: 'Wizard Op',
+        description: 'Inline groups and geofences',
+        type: 'Reconnaissance',
+        start_at: '2026-10-06T08:00:00Z',
+        end_at: '2026-10-09T18:00:00Z',
+        group_ids: [alphaId],
+        groups: [
+          {
+            name: 'SAC',
+            leader_soldier_id: 'S-103',
+            member_soldier_ids: ['S-103', 106, 110],
+          },
+        ],
+        new_geofences: [
+          {
+            name: 'New Zone',
+            kind: 'recon',
+            color: '#F2A900',
+            polygon: [
+              [106.82, -6.22],
+              [106.83, -6.22],
+              [106.825, -6.23],
+            ],
+            area_km2: 0.3,
+          },
+        ],
+      });
+    expect(created.status).toBe(201);
+    expect(created.body.status).toBe('PLANNING');
+    expect(created.body.type).toBe('Reconnaissance');
+    expect(created.body.groups.map((g: any) => g.name).sort()).toEqual([
+      'Alpha',
+      'SAC',
+    ]);
+    const sac = created.body.groups.find((g: any) => g.name === 'SAC');
+    expect(sac.leader_soldier_id).toBe(103);
+    expect(sac.personnel_count).toBe(3);
+    expect(created.body.geofences.some((f: any) => f.name === 'New Zone')).toBe(
+      true,
+    );
+    expect(created.body.summary.group_count).toBe(2);
+    expect(created.body.summary.geofence_count).toBe(1);
+
+    const people = (
+      await request(app.getHttpServer())
+        .get(`/api/operations/${created.body.id}/personnel`)
+        .set(admin)
+    ).body.items;
+    const soldierIds = new Set(people.map((p: any) => p.soldier_id));
+    expect(soldierIds.has(103)).toBe(true);
+    expect(soldierIds.has(106)).toBe(true);
+    expect(soldierIds.has(110)).toBe(true);
+    expect(soldierIds.has(101)).toBe(true);
+
+    const nestedGroup = await request(app.getHttpServer())
+      .post(`/api/operations/${created.body.id}/groups`)
+      .set(admin)
+      .send({
+        name: 'Bravo Cell',
+        leader_soldier_id: 111,
+        member_soldier_ids: [111, 112],
+      });
+    expect(nestedGroup.status).toBe(200);
+    expect(
+      nestedGroup.body.groups.some((g: any) => g.name === 'Bravo Cell'),
+    ).toBe(true);
+
+    const nestedFence = await request(app.getHttpServer())
+      .post(`/api/operations/${created.body.id}/geofences`)
+      .set(admin)
+      .send({
+        name: 'Inline Fence',
+        kind: 'safe',
+        color: '#00AA55',
+        geometry_json: JSON.stringify({
+          type: 'Polygon',
+          coordinates: [
+            [
+              [106.84, -6.24],
+              [106.85, -6.24],
+              [106.845, -6.25],
+              [106.84, -6.24],
+            ],
+          ],
+        }),
+      });
+    expect(nestedFence.status).toBe(200);
+    expect(
+      nestedFence.body.geofences.some((f: any) => f.name === 'Inline Fence'),
+    ).toBe(true);
+  });
+
+  it('delete_rules_allow_completed_and_reject_active', async () => {
+    const admin = await login(app);
+
+    const planning = await request(app.getHttpServer())
+      .post('/api/operations')
+      .set(admin)
+      .send({
+        name: 'Delete Planning',
+        start_at: '2026-10-06T08:00:00Z',
+        end_at: '2026-10-09T18:00:00Z',
+      });
+    expect(planning.status).toBe(201);
+    expect(
+      (
+        await request(app.getHttpServer())
+          .delete(`/api/operations/${planning.body.id}`)
+          .set(admin)
+      ).status,
+    ).toBe(204);
+
+    const active = await request(app.getHttpServer())
+      .post('/api/operations')
+      .set(admin)
+      .send({
+        name: 'Delete Active',
+        start_at: '2026-10-06T08:00:00Z',
+        end_at: '2026-10-09T18:00:00Z',
+      });
+    expect(active.status).toBe(201);
+    const activated = await request(app.getHttpServer())
+      .post(`/api/operations/${active.body.id}/activate`)
+      .set(admin);
+    expect(activated.status).toBe(200);
+    expect(
+      (
+        await request(app.getHttpServer())
+          .delete(`/api/operations/${active.body.id}`)
+          .set(admin)
+      ).status,
+    ).toBe(409);
+
+    const completed = await request(app.getHttpServer())
+      .post('/api/operations')
+      .set(admin)
+      .send({
+        name: 'Delete Completed',
+        start_at: '2026-10-06T08:00:00Z',
+        end_at: '2026-10-09T18:00:00Z',
+      });
+    expect(completed.status).toBe(201);
+    await request(app.getHttpServer())
+      .post(`/api/operations/${completed.body.id}/activate`)
+      .set(admin);
+    const done = await request(app.getHttpServer())
+      .post(`/api/operations/${completed.body.id}/complete`)
+      .set(admin);
+    expect(done.status).toBe(200);
+    expect(
+      (
+        await request(app.getHttpServer())
+          .delete(`/api/operations/${completed.body.id}`)
+          .set(admin)
+      ).status,
+    ).toBe(204);
+  });
 });
