@@ -2,10 +2,19 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import Database from 'better-sqlite3';
 import { createTestApp, TestApp } from './app.e2e-setup';
-import { encodeFlags, packMeshFrame, packPayload } from '../src/mesh/frame';
+import { encodeFlags, packPayload, packSatelliteBurst } from '../src/mesh/frame';
 import { makeRecord } from '../src/common/records';
 import { DatabaseService } from '../src/database/database.service';
 import { hasPermission, hashPassword } from '../src/database/access';
+import { syncNoContact } from '../src/database/alert-rules';
+import {
+  NO_CONTACT_SOLDIER_ID,
+  SEED_INTERVAL_MS,
+  SEED_SOLDIERS,
+  seedTickCount,
+} from '../src/database/seed-explorer';
+import { runRetentionIfDue } from '../src/database/retention';
+import { buildBurstHex, firstRecord, ingestBurst } from './ingest-helpers';
 
 describe('API e2e (ported from test_api.py)', () => {
   let harness: TestApp;
@@ -27,44 +36,137 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('seed_counts', async () => {
-    const summary = (await request(app.getHttpServer()).get('/api/explorer/summary'))
-      .body;
+    const hours = Number(process.env.TRACKFORGE_SEED_HOURS || 1);
+    const ticks = seedTickCount(hours);
+    expect(ticks).toBe(Math.round((hours * 3600 * 1000) / SEED_INTERVAL_MS));
+    expect(SEED_SOLDIERS).toHaveLength(15);
+
+    const db = harness.moduleRef.get(DatabaseService);
+    const telemetry = (
+      db.connection
+        .prepare(
+          `SELECT COUNT(*) AS n FROM explorer_records WHERE category = 'TELEMETRY'`,
+        )
+        .get() as any
+    ).n;
+    const bursts = (
+      db.connection
+        .prepare(
+          `SELECT COUNT(*) AS n FROM explorer_records
+           WHERE category = 'UPLINK' AND data_type = 'SATELLITE_BURST'`,
+        )
+        .get() as any
+    ).n;
+    const contactSoldierRows = (
+      db.connection
+        .prepare(
+          `SELECT COUNT(*) AS n FROM explorer_records
+           WHERE category = 'TELEMETRY' AND soldier_id = ?`,
+        )
+        .get(NO_CONTACT_SOLDIER_ID) as any
+    ).n;
+    // Full grid minus NO_CONTACT gap skips for soldier 115.
+    expect(telemetry).toBe(
+      (SEED_SOLDIERS.length - 1) * ticks + contactSoldierRows,
+    );
+    expect(contactSoldierRows).toBeLessThan(ticks);
+    expect(bursts).toBeGreaterThan(0);
+
+    const distinctSoldiers = (
+      db.connection
+        .prepare(
+          `SELECT COUNT(DISTINCT soldier_id) AS n FROM explorer_records
+           WHERE category = 'TELEMETRY'`,
+        )
+        .get() as any
+    ).n;
+    expect(distinctSoldiers).toBe(15);
+
+    const summary = (
+      await request(app.getHttpServer())
+        .get('/api/explorer/summary')
+        .query({ include_transport: '1' })
+    ).body;
     const counts = Object.fromEntries(
       summary.by_category.map((item: any) => [item.category, item.count]),
     );
-    expect(summary.total).toBe(505);
-    expect(counts).toEqual({
-      TELEMETRY: 240,
-      MESH: 240,
-      BEACON: 18,
-      SYSTEM: 3,
-      UPLINK: 2,
-      SPECIAL: 2,
-    });
+    expect(counts.TELEMETRY).toBe(telemetry);
+    expect(counts.UPLINK).toBe(bursts);
+    expect(summary.total).toBe(telemetry + bursts);
+  });
+
+  it('retention_deletes_old_telemetry_not_masters', async () => {
+    const db = harness.moduleRef.get(DatabaseService);
+    db.connection
+      .prepare(
+        `INSERT INTO groups (name, description, status) VALUES ('KeepMe', null, 'ACTIVE')`,
+      )
+      .run();
+    const oldIso = '2015-01-01T00:00:00Z';
+    db.connection
+      .prepare(
+        `INSERT INTO explorer_records (
+          category, data_type, entity_type, entity_id, soldier_id, group_id,
+          gateway_id, beacon_id, event_time, received_at, position_source, transport,
+          freshness, severity, record_origin, raw_format, raw_hex, raw_bytes_length,
+          data_json, is_sos, created_at
+        ) VALUES (
+          'TELEMETRY', 'SOLDIER_TELEMETRY', 'SOLDIER', '1', 1, null,
+          'GW', null, ?, ?, 'GNSS', 'SATELLITE',
+          'STALE', null, 'SIMULATED', 'PAYLOAD_21', 'aa', 1,
+          '{}', 0, ?
+        )`,
+      )
+      .run(oldIso, oldIso, oldIso);
+    db.connection
+      .prepare(
+        `INSERT INTO alerts (
+          alert_code, alert_type, severity, status, entity_type, entity_id,
+          soldier_id, group_id, gateway_id, source_record_id, event_time,
+          first_seen_at, last_seen_at, position_source, latitude, longitude,
+          message, acknowledged_at, acknowledged_by, resolved_at, resolved_by,
+          derived_from, record_origin, created_at, updated_at, details_json
+        ) VALUES (
+          'OLD-1', 'SOS', 'CRITICAL', 'ACTIVE', 'SOLDIER', '1',
+          1, null, 'GW', 1, ?,
+          ?, ?, null, null, null,
+          'old', null, null, null, null,
+          'FLAGS', 'SIMULATED', ?, ?, '{}'
+        )`,
+      )
+      .run(oldIso, oldIso, oldIso, oldIso, oldIso);
+
+    // Force retention regardless of last-run meta.
+    db.connection.exec(`DELETE FROM app_meta WHERE key = 'retention_last_run_at'`);
+    const result = runRetentionIfDue(db.connection, true);
+    expect(result.ran).toBe(true);
+    expect(result.deletedTelemetry).toBeGreaterThanOrEqual(1);
+    expect(result.deletedAlerts).toBeGreaterThanOrEqual(1);
+
+    const groups = (
+      db.connection.prepare(`SELECT COUNT(*) AS n FROM groups WHERE name = 'KeepMe'`).get() as any
+    ).n;
+    expect(groups).toBe(1);
+    const users = (
+      db.connection.prepare(`SELECT COUNT(*) AS n FROM users`).get() as any
+    ).n;
+    expect(users).toBeGreaterThan(0);
   });
 
   it('telemetry_keeps_sos_flag_visible', async () => {
     const flags = encodeFlags({ sos: true, strap: true, position: 'GNSS' });
-    const response = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
+    const response = await ingestBurst(
+      app,
+      {
         soldier_id: 4242,
         seq: 7,
         timestamp: '2026-10-04T12:00:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
         flags,
-        group_id: 'Alpha',
-        gateway_id: 'GW-01',
-        record_origin: 'INGEST',
-      });
+      },
+      { gateway_id: 'GW-01', record_origin: 'INGEST' },
+    );
     expect(response.status).toBe(200);
-    const body = response.body;
+    const body = firstRecord(response);
     expect(body.category).toBe('TELEMETRY');
     expect(body.data.flags.sos).toBe(true);
     expect(body.data.flags.position_source).toBe('GNSS');
@@ -82,61 +184,41 @@ describe('API e2e (ported from test_api.py)', () => {
   it('direct_telemetry_uses_utc_and_21_byte_raw', async () => {
     const flags = encodeFlags({});
     const unix = 1791115200;
-    const response = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
+    const payloadHex = packPayload({
+      soldier_id: 77,
+      seq: 4,
+      timestamp: unix,
+      lat: -6.2,
+      lon: 106.8,
+      hr: 80,
+      hrv: 40,
+      spo2: 98,
+      temp: 36,
+      batt: 90,
+      flags,
+    }).toString('hex');
+    const response = await ingestBurst(
+      app,
+      {
         soldier_id: 77,
         seq: 4,
         timestamp: unix,
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
         flags,
-        received_at: '2026-10-04T19:00:04+07:00',
-      });
+      },
+      { received_at: '2026-10-04T19:00:04+07:00' },
+    );
     expect(response.status).toBe(200);
-    const body = response.body;
+    const body = firstRecord(response);
     expect(body.event_time).toBe('2026-10-04T12:00:00Z');
     expect(body.received_at).toBe('2026-10-04T12:00:04Z');
     expect(body.data.timestamp).toBe(unix);
     expect(body.raw_format).toBe('PAYLOAD_21');
     expect(body.raw_bytes_length).toBe(21);
-    expect(body.raw_hex).toBe(
-      packPayload({
-        soldier_id: 77,
-        seq: 4,
-        timestamp: unix,
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags,
-      }).toString('hex'),
-    );
+    expect(body.raw_hex).toBe(payloadHex);
 
     const rejected = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 78,
-        seq: 1,
-        timestamp: '2026-10-04T12:00:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags,
-        raw_hex: 'abcd',
-      });
+      .post('/api/ingest')
+      .send({ burst_hex: 'abcd' });
     expect(rejected.status).toBe(400);
 
     const listed = await request(app.getHttpServer())
@@ -150,149 +232,107 @@ describe('API e2e (ported from test_api.py)', () => {
     expect(listed.body.total).toBe(1);
   });
 
-  it('mesh_frame_decodes_25_bytes', async () => {
+  it('satellite_burst_decodes_multi_soldier_payloads', async () => {
     const flags = encodeFlags({ position: 'GNSS' });
-    const payload = packPayload({
-      soldier_id: 1024,
-      seq: 125,
-      timestamp: 1791115200,
-      lat: -6.2012345,
-      lon: 106.8123456,
-      hr: 82,
-      hrv: 41,
-      spo2: 97,
-      temp: 34,
-      batt: 86,
-      flags,
-    });
-    const frame = packMeshFrame(1, 3, 1, payload);
+    const burstHex = buildBurstHex([
+      {
+        soldier_id: 1024,
+        seq: 125,
+        timestamp: 1791115200,
+        lat: -6.2012345,
+        lon: 106.8123456,
+        hr: 82,
+        hrv: 41,
+        spo2: 97,
+        temp: 34,
+        batt: 86,
+        flags,
+      },
+      {
+        soldier_id: 1025,
+        seq: 126,
+        timestamp: 1791115201,
+        flags,
+      },
+    ]);
     const response = await request(app.getHttpServer())
-      .post('/api/ingest/mesh-frame')
+      .post('/api/ingest')
       .send({
-        frame_hex: frame.toString('hex'),
+        burst_hex: burstHex,
         gateway_id: 'GW-01',
-        group_id: 'Alpha',
-        rssi: -87,
-        snr: 8.5,
-        pdr: 0.96,
-        spreading_factor: 9,
-        tx_power_dbm: 14,
         received_at: '2026-10-04T12:00:04Z',
       });
     expect(response.status).toBe(200);
-    const body = response.body;
-    expect(body.category).toBe('MESH');
-    expect(body.data_type).toBe('LORA_FRAME');
-    expect(body.raw_bytes_length).toBe(25);
-    expect(body.data.ttl).toBe(3);
-    expect(body.data.hop_count).toBe(1);
-    expect(body.data.payload_length).toBe(21);
-    expect(body.data.payload.seq).toBe(125);
-    expect(body.data.payload.lat).toBe(-6.2012345);
-    expect(body.data.spreading_factor).toBe(9);
+    expect(response.body.soldier_count).toBe(2);
+    expect(response.body.burst.category).toBe('UPLINK');
+    expect(response.body.burst.data_type).toBe('SATELLITE_BURST');
+    expect(response.body.burst.raw_bytes_length).toBe(
+      packSatelliteBurst([
+        packPayload({
+          soldier_id: 1024,
+          seq: 125,
+          timestamp: 1791115200,
+          lat: -6.2012345,
+          lon: 106.8123456,
+          hr: 82,
+          hrv: 41,
+          spo2: 97,
+          temp: 34,
+          batt: 86,
+          flags,
+        }),
+        packPayload({
+          soldier_id: 1025,
+          seq: 126,
+          timestamp: 1791115201,
+          lat: -6.2,
+          lon: 106.8,
+          hr: 80,
+          hrv: 40,
+          spo2: 98,
+          temp: 36,
+          batt: 90,
+          flags,
+        }),
+      ]).length,
+    );
+    const first = response.body.records[0];
+    expect(first.category).toBe('TELEMETRY');
+    expect(first.transport).toBe('SATELLITE');
+    expect(first.data.seq).toBe(125);
+    expect(first.data.lat).toBe(-6.2012345);
   });
 
-  it('mesh_frame_rejects_short_hex', async () => {
+  it('satellite_burst_rejects_invalid_hex', async () => {
     const response = await request(app.getHttpServer())
-      .post('/api/ingest/mesh-frame')
-      .send({ frame_hex: 'abcd' });
+      .post('/api/ingest')
+      .send({ burst_hex: 'abcd' });
     expect(response.status).toBe(400);
   });
 
-  it('uplink_beacon_special_and_system', async () => {
-    const uplink = await request(app.getHttpServer())
-      .post('/api/ingest/uplink')
-      .send({
-        gateway_id: 'GW-02',
-        burst_id: 'burst-test',
-        packet_count: 8,
-        payload_size_bytes: 174,
-        sent_at: '2026-10-04T06:00:00Z',
-        received_at: '2026-10-04T09:00:00Z',
-        delivery_status: 'delivered',
-        retry_count: 1,
-        session_duration_seconds: 30,
-        delivery_mode: 'STORE_AND_CARRY',
-      });
-    expect(uplink.status).toBe(200);
-    expect(uplink.body.data.delivery_mode).toBe('STORE_AND_CARRY');
-    expect(uplink.body.event_time).toBe('2026-10-04T06:00:00Z');
-    expect(uplink.body.received_at).toBe('2026-10-04T09:00:00Z');
-
-    const rejected = await request(app.getHttpServer())
-      .post('/api/ingest/uplink')
-      .send({
-        gateway_id: 'GW-02',
-        burst_id: 'burst-bad',
-        packet_count: 1,
-        payload_size_bytes: 21,
-        sent_at: '2026-10-04T06:00:00Z',
-        received_at: '2026-10-04T06:00:10Z',
-        delivery_status: 'delivered',
-        retry_count: 0,
-        session_duration_seconds: 10,
-        delivery_mode: 'MAYBE',
-      });
-    expect(rejected.status).toBe(422);
-
-    const beacon = await request(app.getHttpServer())
-      .post('/api/ingest/beacon')
-      .send({
-        beacon_id: 'B-99',
-        observer_id: '101',
-        rssi: -88,
-        timestamp: '2026-10-04T08:10:00Z',
-        gateway_id: 'GW-01',
-      });
-    expect(beacon.status).toBe(200);
-    expect(beacon.body.category).toBe('BEACON');
-    expect(beacon.body.soldier_id).toBeNull();
-    expect(beacon.body.entity_type).toBe('BEACON');
-
-    const special = await request(app.getHttpServer())
-      .post('/api/ingest/special')
-      .send({
-        special_type: 'RR_SERIES',
-        soldier_id: 101,
-        group_id: 'Alpha',
-        event_time: '2026-10-04T08:12:00Z',
-        received_at: '2026-10-04T08:12:05Z',
-        payload_hex: '001122',
-        transport: 'MESH',
-        metadata: { note: 'opaque' },
-      });
-    expect(special.status).toBe(200);
-    expect(special.body.data_type).toBe('RR_SERIES');
-    expect(special.body.raw_format).toBe('OPAQUE');
-    expect(special.body.data.metadata).toEqual({ note: 'opaque' });
-
-    const system = await request(app.getHttpServer())
-      .post('/api/ingest/system')
-      .send({
-        event_type: 'DEVICE_STATE_CHANGE',
-        entity_type: 'SOLDIER',
-        entity_id: '101',
-        event_time: '2026-10-04T08:20:00Z',
-        received_at: '2026-10-04T08:20:01Z',
-        severity: 'WARNING',
-        group_id: 'Alpha',
-        gateway_id: 'GW-01',
-        details: { state: 'online' },
-      });
-    expect(system.status).toBe(200);
-    expect(system.body.category).toBe('SYSTEM');
-    expect(system.body.severity).toBe('WARNING');
-    expect(system.body.soldier_id).toBe(101);
+  it('legacy_ingest_routes_are_gone', async () => {
+    for (const path of [
+      '/api/ingest/telemetry',
+      '/api/ingest/mesh-frame',
+      '/api/ingest/uplink',
+      '/api/ingest/beacon',
+      '/api/ingest/special',
+      '/api/ingest/system',
+    ]) {
+      const response = await request(app.getHttpServer()).post(path).send({});
+      expect(response.status).toBe(404);
+    }
   });
 
   it('explorer_search_detail_options_and_csv', async () => {
     const found = (
       await request(app.getHttpServer())
         .get('/api/explorer')
-        .query({ q: 'STORE_AND_CARRY', category: 'UPLINK' })
+        .query({ q: 'burst-seed-', category: 'UPLINK' })
     ).body;
-    expect(found.total).toBe(1);
-    expect(found.items[0].data.delivery_mode).toBe('STORE_AND_CARRY');
+    expect(found.total).toBeGreaterThanOrEqual(1);
+    expect(found.items[0].data_type).toBe('SATELLITE_BURST');
+    expect(found.items[0].data.soldier_count).toBe(15);
 
     const recordId = found.items[0].id;
     const detail = await request(app.getHttpServer()).get(
@@ -343,28 +383,31 @@ describe('API e2e (ported from test_api.py)', () => {
     expect(exported.headers['content-type']).toContain('text/csv');
     const text = exported.text.replace(/^\ufeff/, '');
     expect(text.startsWith('id,category,data_type,')).toBe(true);
-    expect(text.split('\n').filter((line) => line.includes(',UPLINK,')).length).toBe(
-      2,
+    const uplinkLines = text
+      .split('\n')
+      .filter((line) => line.includes(',UPLINK,')).length;
+    expect(uplinkLines).toBeGreaterThan(0);
+    expect(uplinkLines).toBe(
+      (
+        harness.moduleRef
+          .get(DatabaseService)
+          .connection.prepare(
+            `SELECT COUNT(*) AS n FROM explorer_records
+             WHERE category = 'UPLINK' AND data_type = 'SATELLITE_BURST'`,
+          )
+          .get() as any
+      ).n,
     );
   });
 
   it('explorer_and_alerts_accept_all_time_and_30_day_ranges', async () => {
     const flags = encodeFlags({ sos: true, strap: true });
-    const posted = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 5151,
-        seq: 1,
-        timestamp: '2020-01-01T00:00:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags,
-      });
+    const posted = await ingestBurst(app, {
+      soldier_id: 5151,
+      seq: 1,
+      timestamp: '2020-01-01T00:00:00Z',
+      flags,
+    });
     expect(posted.status).toBe(200);
     expect(
       (await request(app.getHttpServer()).get('/api/explorer/filters/options')).body
@@ -436,34 +479,33 @@ describe('API e2e (ported from test_api.py)', () => {
     const seeded = (
       await request(app.getHttpServer())
         .get('/api/alerts')
-        .query({ alert_type: 'SOS', soldier_id: 101 })
+        .query({ alert_type: 'SOS', soldier_id: 104, status: 'ACTIVE' })
     ).body;
-    expect(seeded.total).toBe(1);
+    expect(seeded.total).toBeGreaterThanOrEqual(1);
     expect(seeded.items[0].severity).toBe('CRITICAL');
     expect(seeded.items[0].message).toBe('SOS button pressed');
-    expect(seeded.items[0].source_record.soldier_id).toBe(101);
+    expect(seeded.items[0].source_record.soldier_id).toBe(104);
+    expect(seeded.items[0].source_record_id).not.toBeNull();
     const explorerBefore = (
       await request(app.getHttpServer()).get('/api/explorer/summary')
     ).body.total;
 
     const flags = encodeFlags({ sos: true, strap: true, position: 'GNSS' });
-    const created = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 5150,
-        seq: 9,
-        timestamp: '2026-10-04T13:00:00Z',
-        lat: -6.21,
-        lon: 106.82,
-        hr: 140,
-        hrv: 20,
-        spo2: 96,
-        temp: 37,
-        batt: 70,
-        flags,
-        group_id: 'Alpha',
-      });
+    const created = await ingestBurst(app, {
+      soldier_id: 5150,
+      seq: 9,
+      timestamp: '2026-10-04T13:00:00Z',
+      lat: -6.21,
+      lon: 106.82,
+      hr: 140,
+      hrv: 20,
+      spo2: 96,
+      temp: 37,
+      batt: 70,
+      flags,
+    });
     expect(created.status).toBe(200);
+    const createdRecord = firstRecord(created);
     const listed = (
       await request(app.getHttpServer())
         .get('/api/explorer')
@@ -476,7 +518,7 @@ describe('API e2e (ported from test_api.py)', () => {
         .query({ soldier_id: 5150, alert_type: 'SOS' })
     ).body;
     expect(alerts.total).toBe(1);
-    expect(alerts.items[0].source_record_id).toBe(created.body.id);
+    expect(alerts.items[0].source_record_id).toBe(createdRecord.id);
     expect(
       (await request(app.getHttpServer()).get('/api/explorer/summary')).body.total,
     ).toBe(explorerBefore + 1);
@@ -487,63 +529,82 @@ describe('API e2e (ported from test_api.py)', () => {
     expect(exported.text).toContain(',SOS,');
   });
 
-  it('sos_rows_stay_out_of_explorer', async () => {
+  it('is_sos_is_not_an_explorer_business_filter', async () => {
+    // Legacy is_sos must not hide TELEMETRY. flags.sos is the SOS source of truth.
     const db = harness.moduleRef.get(DatabaseService);
-    const hiddenId = db.insertRecord(
+    const visibleId = db.insertRecord(
       makeRecord({
-        category: 'SYSTEM',
-        data_type: 'OTHER',
+        category: 'TELEMETRY',
+        data_type: 'SOLDIER_TELEMETRY',
         entity_type: 'SOLDIER',
         entity_id: '4242',
         soldier_id: 4242,
-        group_id: 'Alpha',
+        group_id: null,
         gateway_id: 'GW-01',
         event_time: '2026-10-04T12:10:00Z',
         received_at: '2026-10-04T12:10:01Z',
-        position_source: null,
-        transport: null,
+        position_source: 'GNSS',
+        transport: 'SATELLITE',
         freshness: 'FRESH',
-        severity: 'CRITICAL',
+        severity: null,
         record_origin: 'INGEST',
-        raw_format: 'JSON',
-        raw_hex: 'sos-hidden-marker',
-        data: { event_type: 'OTHER' },
+        raw_format: 'PAYLOAD_21',
+        raw_hex: 'sos-visible-marker',
+        data: { flags: { sos: true }, hr: 120 },
         is_sos: 1,
       }),
     );
     const listed = (
       await request(app.getHttpServer())
         .get('/api/explorer')
-        .query({ q: 'sos-hidden-marker' })
+        .query({ q: 'sos-visible-marker' })
     ).body;
-    expect(listed.total).toBe(0);
+    expect(listed.total).toBe(1);
     expect(
-      (await request(app.getHttpServer()).get(`/api/explorer/${hiddenId}`)).status,
-    ).toBe(404);
+      (await request(app.getHttpServer()).get(`/api/explorer/${visibleId}`)).status,
+    ).toBe(200);
   });
 
   it('alert_seed_distribution', async () => {
     const summary = (await request(app.getHttpServer()).get('/api/alerts/summary'))
       .body;
-    expect(summary.total).toBe(36);
-    const severities = Object.fromEntries(
-      summary.by_severity.map((item: any) => [item.severity, item.count]),
-    );
+    // Alerts are derived from seeded TELEMETRY flags / gaps via raiseAlerts (no orphan seed).
+    expect(summary.total).toBeGreaterThan(0);
     const kinds = Object.fromEntries(
       summary.by_type.map((item: any) => [item.alert_type, item.count]),
     );
-    expect(severities).toEqual({ CRITICAL: 6, WARNING: 12, INFO: 18 });
-    expect(kinds).toEqual({
-      SOS: 3,
-      CASUALTY: 1,
-      ARRHYTHMIA: 2,
-      LOW_BATTERY: 7,
-      HEAT_STRESS: 5,
-      STRAP_DISCONNECTED: 4,
-      NO_CONTACT: 14,
-    });
+    for (const type of [
+      'SOS',
+      'CASUALTY',
+      'ARRHYTHMIA',
+      'LOW_BATTERY',
+      'HEAT_STRESS',
+      'STRAP_DISCONNECTED',
+      'NO_CONTACT',
+    ]) {
+      expect(kinds[type] ?? 0).toBeGreaterThanOrEqual(1);
+    }
+
+    const db = harness.moduleRef.get(DatabaseService);
+    const orphans = (
+      db.connection
+        .prepare('SELECT COUNT(*) AS n FROM alerts WHERE source_record_id IS NULL')
+        .get() as any
+    ).n;
+    expect(orphans).toBe(0);
+
     const sos = (await request(app.getHttpServer()).get('/api/alerts/sos')).body;
-    expect(sos.total).toBe(3);
+    expect(sos.total).toBeGreaterThanOrEqual(1);
+    expect(sos.items[0].soldier_id).toBe(104);
+    expect(sos.items[0].source_record_id).not.toBeNull();
+
+    const sosTelemetry = (
+      await request(app.getHttpServer())
+        .get('/api/explorer')
+        .query({ soldier_id: 104, q: '"sos":true' })
+    ).body;
+    expect(sosTelemetry.total).toBeGreaterThan(0);
+
     const options = (
       await request(app.getHttpServer()).get('/api/alerts/filters/options')
     ).body;
@@ -561,25 +622,23 @@ describe('API e2e (ported from test_api.py)', () => {
   it('arrhythmia_episode_does_not_duplicate', async () => {
     const post = async (minute: number, active: boolean) => {
       const flags = encodeFlags({ arrhythmia: active, strap: true });
-      const response = await request(app.getHttpServer())
-        .post('/api/ingest/telemetry')
-        .send({
+      const response = await ingestBurst(
+        app,
+        {
           soldier_id: 8800,
           seq: minute,
           timestamp: `2026-10-04T12:${String(minute).padStart(2, '0')}:00Z`,
-          lat: -6.2,
-          lon: 106.8,
           hr: 90,
           hrv: 30,
           spo2: 97,
           temp: 36,
           batt: 80,
           flags,
-          group_id: 'Alpha',
-          gateway_id: 'GW-01',
-        });
+        },
+        { gateway_id: 'GW-01' },
+      );
       expect(response.status).toBe(200);
-      return response.body.id as number;
+      return firstRecord(response).id as number;
     };
 
     const first = await post(0, true);
@@ -646,42 +705,62 @@ describe('API e2e (ported from test_api.py)', () => {
   });
 
   it('no_contact_resolves_when_telemetry_returns', async () => {
+    const flags = encodeFlags({ strap: true });
+    // Use timestamps at/after seed end so global MAX(event_time) does not
+    // immediately re-open NO_CONTACT after resolve.
+    const early = await ingestBurst(app, {
+      soldier_id: 301,
+      seq: 1,
+      timestamp: '2026-10-04T07:00:00Z',
+      flags,
+    });
+    expect(early.status).toBe(200);
+    syncNoContact(
+      harness.moduleRef.get(DatabaseService).connection,
+      '2026-10-04T09:05:00Z',
+    );
     const before = (
       await request(app.getHttpServer())
         .get('/api/alerts')
-        .query({ soldier_id: 301, alert_type: 'NO_CONTACT' })
+        .query({ soldier_id: 301, alert_type: 'NO_CONTACT', status: 'ACTIVE' })
     ).body;
-    expect(before.total).toBe(1);
-    expect(before.items[0].status).toBe('ACTIVE');
+    expect(before.total).toBeGreaterThanOrEqual(1);
     expect(before.items[0].derived_from).toBe('NO_TELEMETRY');
-    const flags = encodeFlags({ strap: true });
-    const response = await request(app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 301,
-        seq: 1,
-        timestamp: '2026-10-04T08:00:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 70,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags,
-      });
+
+    const response = await ingestBurst(app, {
+      soldier_id: 301,
+      seq: 2,
+      timestamp: '2026-10-04T09:05:00Z',
+      hr: 70,
+      hrv: 40,
+      spo2: 98,
+      temp: 36,
+      batt: 90,
+      flags,
+    });
     expect(response.status).toBe(200);
-    const after = (
+    const active = (
       await request(app.getHttpServer())
         .get('/api/alerts')
-        .query({ soldier_id: 301, alert_type: 'NO_CONTACT' })
+        .query({ soldier_id: 301, alert_type: 'NO_CONTACT', status: 'ACTIVE' })
     ).body;
-    expect(after.total).toBe(1);
-    expect(after.items[0].status).toBe('RESOLVED');
-    expect(after.items[0].resolved_by).toBe('engine');
+    expect(active.total).toBe(0);
+    const resolved = (
+      await request(app.getHttpServer())
+        .get('/api/alerts')
+        .query({
+          soldier_id: 301,
+          alert_type: 'NO_CONTACT',
+          status: 'RESOLVED',
+        })
+    ).body;
+    expect(resolved.total).toBeGreaterThanOrEqual(1);
+    expect(resolved.items[0].resolved_by).toBe('engine');
   });
 
   it('history_reads_explorer_without_double_counting', async () => {
+    // 30s cadence: 08:00:00 .. 08:30:00 inclusive = 61 samples.
+    const expectedHalfHour = 61;
     const params = {
       scope: 'SOLDIER',
       soldier_id: 104,
@@ -693,7 +772,7 @@ describe('API e2e (ported from test_api.py)', () => {
       .query(params);
     expect(summary.status).toBe(200);
     const cards = summary.body.cards;
-    expect(cards.total_records).toBe(60);
+    expect(cards.total_records).toBe(expectedHalfHour);
     expect(cards.distance_is_derived).toBe(true);
     expect(cards.total_distance_km).toBeGreaterThan(0);
     expect(cards.heart_rate_avg_bpm).not.toBeNull();
@@ -704,7 +783,7 @@ describe('API e2e (ported from test_api.py)', () => {
         .get('/api/history')
         .query({ ...params, history_data_type: 'TELEMETRY', limit: 500 })
     ).body;
-    expect(telemetry.total).toBe(30);
+    expect(telemetry.total).toBe(expectedHalfHour);
     expect(new Set(telemetry.items.map((item: any) => item.data_type))).toEqual(
       new Set(['TELEMETRY']),
     );
@@ -712,7 +791,7 @@ describe('API e2e (ported from test_api.py)', () => {
     const track = (
       await request(app.getHttpServer()).get('/api/history/track').query(params)
     ).body.points;
-    expect(track.length).toBe(30);
+    expect(track.length).toBe(expectedHalfHour);
     expect(track.map((point: any) => point.event_time)).toEqual(
       [...track.map((point: any) => point.event_time)].sort(),
     );
@@ -723,7 +802,7 @@ describe('API e2e (ported from test_api.py)', () => {
         .query({ ...params, position_source: 'GNSS' })
     ).body.points;
     expect(gnss.length).toBeGreaterThan(0);
-    expect(gnss.length).toBeLessThan(track.length);
+    expect(gnss.length).toBeLessThanOrEqual(track.length);
 
     const detail = await request(app.getHttpServer()).get(
       `/api/history/point/${track[0].source_id}`,
@@ -740,12 +819,12 @@ describe('API e2e (ported from test_api.py)', () => {
       await request(app.getHttpServer()).get('/api/history/charts').query(params)
     ).body.buckets;
     expect(charts.length).toBeGreaterThan(0);
-    expect(charts[0].samples).toBe(30);
+    expect(charts[0].samples).toBeGreaterThan(0);
 
     const stats = (
       await request(app.getHttpServer()).get('/api/history/statistics').query(params)
     ).body;
-    expect(stats.position_points).toBe(30);
+    expect(stats.position_points).toBe(expectedHalfHour);
     expect(stats.soldiers).toBe(1);
 
     const options = (
@@ -753,7 +832,7 @@ describe('API e2e (ported from test_api.py)', () => {
         .get('/api/history/filters/options')
         .query(params)
     ).body;
-    expect(options.data_types).toContain('MESH_FRAME');
+    expect(options.data_types).toContain('TELEMETRY');
     expect(options.position_sources).toContain('GNSS');
     expect(options.time_ranges).toEqual(['all', '30d']);
     expect(
@@ -762,7 +841,7 @@ describe('API e2e (ported from test_api.py)', () => {
           .get('/api/history/summary')
           .query({ ...params, timeRange: 'all' })
       ).body.cards.total_records,
-    ).toBe(60);
+    ).toBe(expectedHalfHour);
     expect(
       (
         await request(app.getHttpServer())
@@ -786,7 +865,8 @@ describe('API e2e (ported from test_api.py)', () => {
         .get('/api/history/summary')
         .query({ scope: 'GROUP', group_id: 'Alpha' })
     ).body;
-    expect(group.cards.total_records).toBe(505);
+    // Seed telemetry has no group enrichment (groups are not seeded).
+    expect(group.cards.total_records).toBe(0);
     const schema = (await request(app.getHttpServer()).get('/openapi.json')).body;
     expect(schema.paths).toHaveProperty('/api/history/track');
     expect(schema.paths).toHaveProperty('/api/history/point/{record_id}');

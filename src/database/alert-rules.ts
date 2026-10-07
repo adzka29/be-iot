@@ -198,6 +198,8 @@ export interface RaiseAlertsArgs {
   positionSource: string | null;
   recordOrigin: string | null;
   payload: Record<string, any>;
+  /** Default true. Seed/live batching sets false and calls syncNoContact once per tick. */
+  syncNoContactScan?: boolean;
 }
 
 export function raiseAlerts(db: Database, args: RaiseAlertsArgs): void {
@@ -241,7 +243,9 @@ export function raiseAlerts(db: Database, args: RaiseAlertsArgs): void {
     });
   }
   resolveNoContact(db, args.soldierId, args.eventTime);
-  syncNoContact(db, args.eventTime);
+  if (args.syncNoContactScan !== false) {
+    syncNoContact(db, args.eventTime);
+  }
 }
 
 export function resolveNoContact(
@@ -328,111 +332,9 @@ export function syncNoContact(db: Database, asOf: string | null = null): void {
   }
 }
 
-export function seedAlerts(db: Database): void {
-  const episodes: readonly [string, number, string, string][] = [
-    ['SOS', 101, '2026-10-04T08:00:00Z', 'FLAGS'],
-    ['SOS', 102, '2026-10-04T08:05:01Z', 'FLAGS'],
-    ['SOS', 103, '2026-10-04T08:10:02Z', 'FLAGS'],
-    ['CASUALTY', 104, '2026-10-04T08:12:03Z', 'FLAGS'],
-    ['ARRHYTHMIA', 105, '2026-10-04T08:18:04Z', 'FLAGS'],
-    ['ARRHYTHMIA', 106, '2026-10-04T08:20:05Z', 'FLAGS'],
-    ['LOW_BATTERY', 101, '2026-10-04T08:25:00Z', 'FLAGS'],
-    ['LOW_BATTERY', 102, '2026-10-04T08:25:01Z', 'FLAGS'],
-    ['LOW_BATTERY', 103, '2026-10-04T08:25:02Z', 'FLAGS'],
-    ['LOW_BATTERY', 104, '2026-10-04T08:25:03Z', 'FLAGS'],
-    ['LOW_BATTERY', 105, '2026-10-04T08:25:04Z', 'FLAGS'],
-    ['LOW_BATTERY', 106, '2026-10-04T08:25:05Z', 'FLAGS'],
-    ['LOW_BATTERY', 107, '2026-10-04T08:25:06Z', 'FLAGS'],
-    ['HEAT_STRESS', 101, '2026-10-04T08:26:00Z', 'FLAGS'],
-    ['HEAT_STRESS', 102, '2026-10-04T08:26:01Z', 'FLAGS'],
-    ['HEAT_STRESS', 103, '2026-10-04T08:26:02Z', 'FLAGS'],
-    ['HEAT_STRESS', 104, '2026-10-04T08:26:03Z', 'FLAGS'],
-    ['HEAT_STRESS', 105, '2026-10-04T08:26:04Z', 'FLAGS'],
-    ['STRAP_DISCONNECTED', 105, '2026-10-04T08:15:04Z', 'CHEST_STRAP'],
-    ['STRAP_DISCONNECTED', 106, '2026-10-04T08:15:05Z', 'CHEST_STRAP'],
-    ['STRAP_DISCONNECTED', 107, '2026-10-04T08:15:06Z', 'CHEST_STRAP'],
-    ['STRAP_DISCONNECTED', 108, '2026-10-04T08:15:07Z', 'CHEST_STRAP'],
-  ];
-  let inserted = 0;
-  for (const [alertType, soldierId, eventTime, derivedFrom] of episodes) {
-    const source = db
-      .prepare(
-        `
-        SELECT id, position_source, data_json
-        FROM explorer_records
-        WHERE category = 'TELEMETRY' AND soldier_id = ? AND event_time = ?
-        ORDER BY id
-        LIMIT 1
-        `,
-      )
-      .get(soldierId, eventTime) as any;
-    const payload = source != null ? JSON.parse(source.data_json) : {};
-    insertAlert(db, {
-      alert_code: code(alertType, soldierId, eventTime),
-      alert_type: alertType,
-      severity: SEVERITY[alertType],
-      status: 'ACTIVE',
-      entity_type: 'SOLDIER',
-      entity_id: String(soldierId),
-      soldier_id: soldierId,
-      group_id: 'Alpha',
-      gateway_id: 'GW-01',
-      source_record_id: source == null ? null : source.id,
-      event_time: eventTime,
-      first_seen_at: eventTime,
-      last_seen_at: eventTime,
-      position_source: source == null ? null : source.position_source,
-      latitude: payload.lat ?? null,
-      longitude: payload.lon ?? null,
-      message: MESSAGES[alertType],
-      acknowledged_at: null,
-      acknowledged_by: null,
-      resolved_at: null,
-      resolved_by: null,
-      derived_from: derivedFrom,
-      record_origin: 'SIMULATED',
-      created_at: eventTime,
-      updated_at: eventTime,
-      details_json: JSON.stringify(
-        Object.keys(payload).length ? details(payload) : { condition: alertType },
-      ),
-    });
-    inserted += 1;
-  }
-  for (let offset = 0; offset < 14; offset += 1) {
-    const soldierId = 301 + offset;
-    const eventTime = `2026-10-04T07:${String(offset).padStart(2, '0')}:00Z`;
-    insertAlert(db, {
-      alert_code: code('NO_CONTACT', soldierId, eventTime),
-      alert_type: 'NO_CONTACT',
-      severity: 'INFO',
-      status: 'ACTIVE',
-      entity_type: 'SOLDIER',
-      entity_id: String(soldierId),
-      soldier_id: soldierId,
-      group_id: 'Alpha',
-      gateway_id: 'GW-01',
-      source_record_id: null,
-      event_time: eventTime,
-      first_seen_at: eventTime,
-      last_seen_at: eventTime,
-      position_source: null,
-      latitude: null,
-      longitude: null,
-      message: MESSAGES.NO_CONTACT,
-      acknowledged_at: null,
-      acknowledged_by: null,
-      resolved_at: null,
-      resolved_by: null,
-      derived_from: 'NO_TELEMETRY',
-      record_origin: 'SIMULATED',
-      created_at: eventTime,
-      updated_at: eventTime,
-      details_json: JSON.stringify({ gap_seconds: NO_CONTACT_GAP_SECONDS }),
-    });
-    inserted += 1;
-  }
-  if (inserted !== 36) {
-    throw new Error(`seeder inserted ${inserted} alerts, expected 36`);
-  }
+/** @deprecated Alerts are derived via raiseAlerts during unified telemetry seed. */
+export function seedAlerts(_db: Database): void {
+  throw new Error(
+    'seedAlerts removed: use unified seedExplorer (telemetry → raiseAlerts)',
+  );
 }

@@ -35,20 +35,28 @@ export function ensurePersonnel(db: Database, soldierId: number) {
 }
 
 /**
- * Enrichment for explorer_records.group_id:
- * - looks up personnel by soldier_id
- * - auto-registers unknown soldiers as UNASSIGNED (group_id NULL)
- * - returns group name string for denormalized storage, or null
+ * Enrichment for explorer_records.group_id from Personnel master only.
+ * Does NOT invent/create personnel — unknown soldier_id → null group.
  */
 export function resolveGroupName(
   db: Database,
   soldierId: number | null | undefined,
 ): string | null {
   if (soldierId == null) return null;
-  const person = ensurePersonnel(db, soldierId);
-  if (person.group_id == null) return null;
+  const person = getPersonnelBySoldier(db, soldierId);
+  if (person == null || person.group_id == null) return null;
   const group = getGroupById(db, person.group_id);
   return group?.name ?? null;
+}
+
+/** Optional personnel display name for Explorer enrichment (null if unknown). */
+export function resolvePersonnelName(
+  db: Database,
+  soldierId: number | null | undefined,
+): string | null {
+  if (soldierId == null) return null;
+  const person = getPersonnelBySoldier(db, soldierId);
+  return person?.name ?? null;
 }
 
 /** Normalize "S-103" / "103" / 103 → number. */
@@ -114,58 +122,11 @@ export function groupMemberCount(db: Database, groupId: number): number {
   ).n as number;
 }
 
-export function seedPersonnelMaster(db: Database) {
-  if (process.env.TRACKFORGE_SEED === '0') return;
-  const now = utcNow();
-  const groupCount = (
-    db.prepare('SELECT COUNT(*) AS n FROM groups').get() as any
-  ).n;
-  if (groupCount === 0) {
-    db.prepare(
-      `INSERT INTO groups (name, description, leader_soldier_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
-    ).run('Alpha', 'Seeded Alpha squad', 101, now, now);
-  }
-  const alpha = getGroupByName(db, 'Alpha');
-  if (alpha == null) return;
-
-  // Backfill timestamps / leader on existing Alpha
-  db.prepare(
-    `UPDATE groups SET
-       leader_soldier_id = COALESCE(leader_soldier_id, ?),
-       created_at = COALESCE(created_at, ?),
-       updated_at = COALESCE(updated_at, ?)
-     WHERE id = ?`,
-  ).run(101, now, now, alpha.id);
-
-  const personCount = (
-    db.prepare('SELECT COUNT(*) AS n FROM personnel').get() as any
-  ).n;
-  if (personCount === 0) {
-    const insert = db.prepare(
-      `INSERT INTO personnel (soldier_id, name, group_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'ACTIVE', ?, ?)`,
-    );
-    for (let soldierId = 101; soldierId <= 108; soldierId++) {
-      insert.run(
-        ...bind([soldierId, `Soldier ${soldierId}`, alpha.id, now, now]),
-      );
-    }
-  }
-
-  const memberCount = (
-    db
-      .prepare('SELECT COUNT(*) AS n FROM group_members WHERE group_id = ?')
-      .get(alpha.id) as any
-  ).n;
-  if (memberCount === 0) {
-    const soldiers = db
-      .prepare('SELECT soldier_id FROM personnel WHERE group_id = ? ORDER BY soldier_id')
-      .all(alpha.id) as { soldier_id: number }[];
-    const ids =
-      soldiers.length > 0
-        ? soldiers.map((s) => s.soldier_id)
-        : [101, 102, 103, 104, 105, 106, 107, 108];
-    setGroupMembers(db, alpha.id, ids, 101);
-  }
+/**
+ * Groups/personnel are NOT seeded.
+ * Settings stays empty until Operations (or Groups/Personnel APIs) create them.
+ * Telemetry seed still works with group_id null until enrichment is assigned.
+ */
+export function seedPersonnelMaster(_db: Database) {
+  // intentionally empty — org structure is created by operations / admin APIs
 }

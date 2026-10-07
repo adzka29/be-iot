@@ -14,6 +14,7 @@ import { BindingsModule } from './bindings/bindings.module';
 import { AuditModule } from './audit/audit.module';
 import { TicketsModule } from './tickets/tickets.module';
 import { OperationsModule } from './operations/operations.module';
+import { SimulatorModule } from './simulator/simulator.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { OperationsModule } from './operations/operations.module';
     AuditModule,
     TicketsModule,
     OperationsModule,
+    SimulatorModule,
   ],
 })
 export class AppModule {}

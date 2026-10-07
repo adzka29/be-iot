@@ -12,6 +12,7 @@ import type { Response } from 'express';
 import { DatabaseService } from '../database/database.service';
 import { TIME_RANGES, canonicalTime, timeRangeStart } from '../common/records';
 import { bind } from '../common/sql';
+import { resolvePersonnelName } from '../database/personnel';
 
 const CSV_COLUMNS = [
   'id', 'category', 'data_type', 'entity_type', 'entity_id', 'soldier_id',
@@ -59,10 +60,29 @@ export class ExplorerController {
     return Array.isArray(value) ? value : [value];
   }
 
+  private toApi(row: any) {
+    const item = this.db.recordToApi(row) as Record<string, unknown>;
+    const soldierId =
+      item.soldier_id != null ? Number(item.soldier_id) : null;
+    item.personnel_name = resolvePersonnelName(this.db.connection, soldierId);
+    return item;
+  }
+
   private filters(q: any): { where: string; params: unknown[] } {
-    const conditions = ['is_sos = 0'];
+    // is_sos is legacy schema only — not a business filter.
+    // SOS truth is data.flags.sos; TELEMETRY with SOS stays visible.
+    const conditions: string[] = ['1 = 1'];
     const params: unknown[] = [];
-    const category = this.asList(q.category);
+    // Default FE domain = TELEMETRY. Transport (UPLINK/SATELLITE_BURST) is
+    // internal audit — only when include_transport=1 or category is explicit.
+    let category = this.asList(q.category);
+    if (
+      (!category || !category.length) &&
+      q.include_transport !== '1' &&
+      q.include_transport !== 'true'
+    ) {
+      category = ['TELEMETRY'];
+    }
     const dataType = this.asList(q.data_type);
     for (const [column, values] of [
       ['category', category],
@@ -114,15 +134,21 @@ export class ExplorerController {
         IFNULL(entity_id, '') LIKE ? COLLATE NOCASE OR
         IFNULL(entity_type, '') LIKE ? COLLATE NOCASE OR
         IFNULL(CAST(soldier_id AS TEXT), '') LIKE ? OR
+        IFNULL(group_id, '') LIKE ? COLLATE NOCASE OR
         data_type LIKE ? COLLATE NOCASE OR
         category LIKE ? COLLATE NOCASE OR
         IFNULL(transport, '') LIKE ? COLLATE NOCASE OR
         IFNULL(position_source, '') LIKE ? COLLATE NOCASE OR
         IFNULL(raw_hex, '') LIKE ? COLLATE NOCASE OR
         data_json LIKE ? COLLATE NOCASE OR
-        IFNULL(record_origin, '') LIKE ? COLLATE NOCASE
+        IFNULL(record_origin, '') LIKE ? COLLATE NOCASE OR
+        EXISTS (
+          SELECT 1 FROM personnel p
+          WHERE p.soldier_id = explorer_records.soldier_id
+            AND p.name LIKE ? COLLATE NOCASE
+        )
       )`);
-      for (let i = 0; i < 11; i++) params.push(needle);
+      for (let i = 0; i < 13; i++) params.push(needle);
     }
     return { where: conditions.join(' AND '), params };
   }
@@ -153,7 +179,7 @@ export class ExplorerController {
     const limit = Math.min(Math.max(Number(q.limit || 50), 1), 500);
     const offset = Math.max(Number(q.offset || 0), 0);
     const { total, rows } = this.rows(where, params, limit, offset);
-    const items = rows.map((row) => this.db.recordToApi(row));
+    const items = rows.map((row) => this.toApi(row));
     return { items, limit, offset, count: items.length, total };
   }
 
@@ -217,7 +243,7 @@ export class ExplorerController {
         .prepare(
           `
           SELECT DISTINCT ${column} AS value FROM explorer_records
-          WHERE is_sos = 0 AND ${column} IS NOT NULL AND ${column} != ''
+          WHERE category = 'TELEMETRY' AND ${column} IS NOT NULL AND ${column} != ''
           ORDER BY value
           `,
         )
@@ -241,7 +267,7 @@ export class ExplorerController {
     };
     const lines = [CSV_COLUMNS.join(',')];
     for (const row of rows) {
-      const item = this.db.recordToApi(row);
+      const item = this.toApi(row);
       lines.push(
         CSV_COLUMNS.map((col) => {
           const val = col === 'data' ? JSON.stringify(item.data) : item[col];
@@ -257,9 +283,9 @@ export class ExplorerController {
   @Get(':recordId')
   getOne(@Param('recordId', ParseIntPipe) recordId: number) {
     const row = this.db.getRecord(recordId);
-    if (row == null || row.is_sos !== 0) {
+    if (row == null) {
       throw new HttpException('record not found', 404);
     }
-    return this.db.recordToApi(row);
+    return this.toApi(row);
   }
 }

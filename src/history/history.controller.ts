@@ -82,7 +82,8 @@ export class HistoryController {
   private where(q: any) {
     const soldierId = q.soldier_id != null && q.soldier_id !== '' ? Number(q.soldier_id) : null;
     const { clause, params } = this.scopeClause(q.scope, soldierId, q.group_id);
-    const conditions = ['is_sos = 0', clause];
+    // is_sos is legacy — not a History business filter. SOS telemetry stays visible.
+    const conditions = [clause];
     const categories = this.categories(this.asList(q.history_data_type));
     if (categories) {
       conditions.push(`category IN (${categories.map(() => '?').join(', ')})`);
@@ -451,7 +452,7 @@ export class HistoryController {
   @Get('point/:recordId')
   point(@Param('recordId', ParseIntPipe) recordId: number) {
     const row = this.db.getRecord(recordId);
-    if (row == null || row.is_sos !== 0) {
+    if (row == null) {
       throw new HttpException('record not found', 404);
     }
     return this.detail(row);

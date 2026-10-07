@@ -19,6 +19,11 @@ export async function createTestApp(): Promise<TestApp> {
   const dbPath = path.join(dir, 'trackforge.db');
   process.env.TRACKFORGE_DB = dbPath;
   process.env.TRACKFORGE_SEED = '1';
+  // Always force compact deterministic seed for e2e (ignore shell leftovers like HOURS=24).
+  // Production/demo default remains TRACKFORGE_SEED_HOURS=24 (43,200 TELEMETRY).
+  process.env.TRACKFORGE_SEED_HOURS = '0.75';
+  process.env.TRACKFORGE_SEED_BASE = '2026-10-04T08:00:00Z';
+  process.env.TRACKFORGE_LIVE_SIM = '0';
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],

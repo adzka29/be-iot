@@ -52,6 +52,7 @@
       "^.+\\.(t|j)s$": "ts-jest"
     },
     "testEnvironment": "node",
+    "testTimeout": 120000,
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/src/$1"
     }

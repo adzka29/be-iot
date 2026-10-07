@@ -1,6 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { createTestApp, TestApp } from './app.e2e-setup';
+import { DatabaseService } from '../src/database/database.service';
+import { setGroupMembers } from '../src/database/personnel';
 
 async function login(
   app: INestApplication,
@@ -49,12 +51,28 @@ async function geofence(app: INestApplication) {
   return created.body.id as number;
 }
 
+/** Groups are not seeded — create Alpha + members when a test needs them. */
 async function alpha(app: INestApplication, headers: Record<string, string>) {
   const options = await request(app.getHttpServer())
     .get('/api/operations/groups/options')
     .set(headers);
   expect(options.status).toBe(200);
-  return options.body.items.find((item: any) => item.name === 'Alpha').id as number;
+  const existing = options.body.items.find((item: any) => item.name === 'Alpha');
+  if (existing) return existing.id as number;
+
+  const created = await request(app.getHttpServer())
+    .post('/api/groups')
+    .set(headers)
+    .send({ name: 'Alpha', description: 'Test squad for operations' });
+  expect(created.status).toBe(201);
+  const db = app.get(DatabaseService).connection;
+  setGroupMembers(
+    db,
+    created.body.id,
+    [101, 102, 103, 104, 105, 106, 107, 108],
+    101,
+  );
+  return created.body.id as number;
 }
 
 describe('Operations e2e (ported from test_operations.py)', () => {

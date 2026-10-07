@@ -293,12 +293,12 @@ export class OperationRepository {
           g.leader_soldier_id,
           (
             SELECT er.event_time FROM explorer_records er
-            WHERE er.is_sos = 0 AND er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
+            WHERE er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
             ORDER BY er.event_time DESC, er.id DESC LIMIT 1
           ) AS last_seen,
           (
             SELECT er.data_json FROM explorer_records er
-            WHERE er.is_sos = 0 AND er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
+            WHERE er.category = 'TELEMETRY' AND er.soldier_id = p.soldier_id
             ORDER BY er.event_time DESC, er.id DESC LIMIT 1
           ) AS data_json
         FROM personnel p
@@ -338,7 +338,7 @@ export class OperationRepository {
     return this.db
       .prepare(
         `SELECT event_time, data_json FROM explorer_records
-         WHERE is_sos = 0 AND category = 'TELEMETRY' AND soldier_id = ?
+         WHERE category = 'TELEMETRY' AND soldier_id = ?
          ORDER BY event_time DESC, id DESC LIMIT 1`,
       )
       .get(soldierId) as any;

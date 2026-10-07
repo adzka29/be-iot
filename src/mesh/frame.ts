@@ -9,6 +9,10 @@ export const HEADER_LEN = 4;
 export const PAYLOAD_LEN = 21;
 export const FRAME_LEN = HEADER_LEN + PAYLOAD_LEN;
 
+/** Satellite burst: opaque 6-byte transport header + N × 21-byte soldier payloads. */
+export const BURST_HEADER_LEN = 6;
+export const MAX_BURST_SOLDIERS = 15;
+
 export type DecodedFlags = {
   raw: number;
   sos: boolean;
@@ -220,4 +224,91 @@ export function soldierPayloadAsData(payload: SoldierPayload): Record<string, un
     data.vital = 'TANPA VITAL';
   }
   return data;
+}
+
+export type SatelliteBurst = {
+  /** Original burst bytes (header + payloads), preserved as-is. */
+  raw: Buffer;
+  header: Buffer;
+  header_hex: string;
+  soldier_count: number;
+  payloads: Array<{
+    index: number;
+    raw: Buffer;
+    raw_hex: string;
+    decoded: SoldierPayload;
+  }>;
+};
+
+/**
+ * Decode a satellite burst: 6-byte header + N×21-byte soldier payloads.
+ * N is derived from length so we do not invent undocumented header fields.
+ * Theoretical max N = 15.
+ */
+export function decodeSatelliteBurst(raw: Buffer): SatelliteBurst {
+  if (raw.length < BURST_HEADER_LEN + PAYLOAD_LEN) {
+    throw new Error(
+      `satellite burst must be at least ${BURST_HEADER_LEN + PAYLOAD_LEN} bytes (6-byte header + one 21-byte payload), got ${raw.length}`,
+    );
+  }
+  const bodyLen = raw.length - BURST_HEADER_LEN;
+  if (bodyLen % PAYLOAD_LEN !== 0) {
+    throw new Error(
+      `satellite burst body must be a multiple of ${PAYLOAD_LEN} bytes after the ${BURST_HEADER_LEN}-byte header, got ${bodyLen}`,
+    );
+  }
+  const soldier_count = bodyLen / PAYLOAD_LEN;
+  if (soldier_count < 1 || soldier_count > MAX_BURST_SOLDIERS) {
+    throw new Error(
+      `satellite burst soldier count must be 1–${MAX_BURST_SOLDIERS}, got ${soldier_count}`,
+    );
+  }
+  const header = Buffer.from(raw.subarray(0, BURST_HEADER_LEN));
+  const payloads: SatelliteBurst['payloads'] = [];
+  for (let index = 0; index < soldier_count; index += 1) {
+    const start = BURST_HEADER_LEN + index * PAYLOAD_LEN;
+    const slice = Buffer.from(raw.subarray(start, start + PAYLOAD_LEN));
+    payloads.push({
+      index,
+      raw: slice,
+      raw_hex: slice.toString('hex'),
+      decoded: decodePayload(slice),
+    });
+  }
+  return {
+    raw: Buffer.from(raw),
+    header,
+    header_hex: header.toString('hex'),
+    soldier_count,
+    payloads,
+  };
+}
+
+/** Build a burst for tests/tools: opaque 6-byte header + packed payloads. */
+export function packSatelliteBurst(
+  payloads: Buffer[],
+  header?: Buffer,
+): Buffer {
+  if (!payloads.length || payloads.length > MAX_BURST_SOLDIERS) {
+    throw new Error(
+      `satellite burst must contain 1–${MAX_BURST_SOLDIERS} soldier payloads`,
+    );
+  }
+  for (const payload of payloads) {
+    if (payload.length !== PAYLOAD_LEN) {
+      throw new Error(
+        `soldier payload must be ${PAYLOAD_LEN} bytes, got ${payload.length}`,
+      );
+    }
+  }
+  const hdr =
+    header && header.length === BURST_HEADER_LEN
+      ? Buffer.from(header)
+      : Buffer.alloc(BURST_HEADER_LEN, 0);
+  if (header && header.length !== BURST_HEADER_LEN) {
+    throw new Error(
+      `burst header must be ${BURST_HEADER_LEN} bytes, got ${header.length}`,
+    );
+  }
+  return Buffer.concat([hdr, ...payloads]);
 }

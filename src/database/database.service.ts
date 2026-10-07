@@ -4,9 +4,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { bind } from '../common/sql';
 import { seedExplorer } from './seed-explorer';
-import { seedAlerts } from './alert-rules';
 import { seedAccess } from './access';
 import { seedPersonnelMaster } from './personnel';
+import { runRetentionIfDue } from './retention';
 
 export const CATEGORIES = [
   'TELEMETRY',
@@ -503,27 +503,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         n: number;
       }
     ).n;
+    // Unified seed: TELEMETRY → Explorer + raiseAlerts → History (same records).
+    // Idempotent: only when explorer is empty. Live sim continues afterward.
     if (explorerCount === 0 && process.env.TRACKFORGE_SEED !== '0') {
       seedExplorer(conn);
     }
 
-    const alertCount = (
-      conn.prepare('SELECT COUNT(*) AS n FROM alerts').get() as { n: number }
-    ).n;
-    const explorerAfter = (
-      conn.prepare('SELECT COUNT(*) AS n FROM explorer_records').get() as {
-        n: number;
-      }
-    ).n;
-    if (
-      alertCount === 0 &&
-      explorerAfter &&
-      process.env.TRACKFORGE_SEED !== '0'
-    ) {
-      seedAlerts(conn);
-    }
-
     seedAccess(conn);
+    runRetentionIfDue(conn);
   }
 
   insertRecord(record: Record<string, unknown>): number {

@@ -10,13 +10,23 @@ import {
   Post,
   Put,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { DatabaseService } from '../database/database.service';
+import {
+  effectiveAccess,
+  getUser,
+  hasPermission,
+  isActiveBinding,
+  loadBinding,
+} from '../database/access';
 import {
   getGroupById,
   getGroupByName,
   getPersonnelBySoldier,
 } from '../database/personnel';
+import { actorFromSession, sessionToken } from '../common/audit';
 import { utcNow } from '../common/records';
 import { bind } from '../common/sql';
 
@@ -57,10 +67,47 @@ export class PersonnelController {
     };
   }
 
+  /** Domain `groups` — Settings Groups / master org. */
+  private requireGroups(request: Request, write: boolean) {
+    return this.requireDomain(request, 'groups', write);
+  }
+
+  /** Domain `personal` — Personnel master (roster names/status). */
+  private requirePersonal(request: Request, write: boolean) {
+    return this.requireDomain(request, 'personal', write);
+  }
+
+  private requireDomain(request: Request, domain: string, write: boolean) {
+    const conn = this.db.connection;
+    const actor = actorFromSession(conn, sessionToken(request));
+    if (actor == null) throw new HttpException('authentication required', 401);
+    const user = getUser(conn, actor.id!);
+    if (user == null) throw new HttpException('authentication required', 401);
+    const access = effectiveAccess(conn, user.id);
+    const granted = new Set(access?.permissions ?? []);
+    if (!hasPermission(granted, domain, write ? 'write' : 'read')) {
+      throw new HttpException('permission denied', 403);
+    }
+    if (write) {
+      if (
+        user.identity_type !== 'HUMAN' ||
+        user.verification !== 'VERIFIED' ||
+        user.status !== 'ACTIVE'
+      ) {
+        throw new HttpException('account is not active', 403);
+      }
+      if (!isActiveBinding(loadBinding(conn, user.id), utcNow())) {
+        throw new HttpException('account is not active', 403);
+      }
+    }
+    return user;
+  }
+
   // ── Groups master ──────────────────────────────────────────
 
   @Get('api/groups')
-  listGroups() {
+  listGroups(@Req() request: Request) {
+    this.requireGroups(request, false);
     const rows = this.db.connection
       .prepare('SELECT * FROM groups ORDER BY name COLLATE NOCASE')
       .all() as any[];
@@ -69,7 +116,8 @@ export class PersonnelController {
 
   @Post('api/groups')
   @HttpCode(201)
-  createGroup(@Body() body: any) {
+  createGroup(@Req() request: Request, @Body() body: any) {
+    this.requireGroups(request, true);
     const name = String(body.name || '').trim();
     if (!name) throw new HttpException('name is required', 422);
     const description = body.description
@@ -92,7 +140,11 @@ export class PersonnelController {
   }
 
   @Get('api/groups/:groupId')
-  getGroup(@Param('groupId', ParseIntPipe) groupId: number) {
+  getGroup(
+    @Req() request: Request,
+    @Param('groupId', ParseIntPipe) groupId: number,
+  ) {
+    this.requireGroups(request, false);
     const row = getGroupById(this.db.connection, groupId);
     if (row == null) throw new HttpException('group not found', 404);
     return this.groupItem(row);
@@ -100,9 +152,11 @@ export class PersonnelController {
 
   @Patch('api/groups/:groupId')
   updateGroup(
+    @Req() request: Request,
     @Param('groupId', ParseIntPipe) groupId: number,
     @Body() body: any,
   ) {
+    this.requireGroups(request, true);
     const row = getGroupById(this.db.connection, groupId);
     if (row == null) throw new HttpException('group not found', 404);
     const fields: Record<string, unknown> = {};
@@ -144,7 +198,8 @@ export class PersonnelController {
   // ── Personnel master ───────────────────────────────────────
 
   @Get('api/personnel')
-  listPersonnel(@Query() q: any) {
+  listPersonnel(@Req() request: Request, @Query() q: any) {
+    this.requirePersonal(request, false);
     const conditions = ['1 = 1'];
     const params: unknown[] = [];
     if (q.status) {
@@ -185,7 +240,11 @@ export class PersonnelController {
   }
 
   @Get('api/personnel/:personnelId')
-  getPersonnel(@Param('personnelId', ParseIntPipe) personnelId: number) {
+  getPersonnel(
+    @Req() request: Request,
+    @Param('personnelId', ParseIntPipe) personnelId: number,
+  ) {
+    this.requirePersonal(request, false);
     const row = this.db.connection
       .prepare('SELECT * FROM personnel WHERE id = ?')
       .get(personnelId) as any;
@@ -195,7 +254,8 @@ export class PersonnelController {
 
   @Post('api/personnel')
   @HttpCode(201)
-  createPersonnel(@Body() body: any) {
+  createPersonnel(@Req() request: Request, @Body() body: any) {
+    this.requirePersonal(request, true);
     const soldierId = Number(body.soldier_id);
     if (!Number.isFinite(soldierId)) {
       throw new HttpException('soldier_id is required', 422);
@@ -234,9 +294,11 @@ export class PersonnelController {
 
   @Patch('api/personnel/:personnelId')
   updatePersonnel(
+    @Req() request: Request,
     @Param('personnelId', ParseIntPipe) personnelId: number,
     @Body() body: any,
   ) {
+    this.requirePersonal(request, true);
     const row = this.db.connection
       .prepare('SELECT * FROM personnel WHERE id = ?')
       .get(personnelId) as any;
@@ -280,9 +342,13 @@ export class PersonnelController {
 
   @Put('api/personnel/by-soldier/:soldierId/group')
   assignGroupBySoldier(
+    @Req() request: Request,
     @Param('soldierId', ParseIntPipe) soldierId: number,
     @Body() body: any,
   ) {
+    // Assign touches both domains; require write on personal (roster) + groups.
+    this.requirePersonal(request, true);
+    this.requireGroups(request, true);
     let person = getPersonnelBySoldier(this.db.connection, soldierId);
     if (person == null) {
       const now = utcNow();

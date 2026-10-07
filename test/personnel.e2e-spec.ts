@@ -1,108 +1,107 @@
+import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { createTestApp, TestApp } from './app.e2e-setup';
 import { encodeFlags } from '../src/mesh/frame';
+import { firstRecord, ingestBurst } from './ingest-helpers';
+
+async function login(
+  app: INestApplication,
+  account = 'superadmin',
+  password = 'superadmin',
+) {
+  const logged = await request(app.getHttpServer())
+    .post('/users/login')
+    .send({ account, password });
+  expect(logged.status).toBe(200);
+  return { Authorization: `Bearer ${logged.body.session_id}` };
+}
 
 describe('personnel master enrichment', () => {
   let harness: TestApp;
+  let headers: Record<string, string>;
 
   beforeEach(async () => {
     harness = await createTestApp();
+    headers = await login(harness.app);
   });
 
   afterEach(async () => {
     await harness.close();
   });
 
-  it('seeds groups and personnel master separately from wire packet', async () => {
-    const groups = (await request(harness.app.getHttpServer()).get('/api/groups')).body;
-    expect(groups.items.some((g: any) => g.name === 'Alpha')).toBe(true);
-    const alpha = groups.items.find((g: any) => g.name === 'Alpha');
-    expect(alpha.personnel_count).toBe(8);
-
-    const people = (
-      await request(harness.app.getHttpServer())
-        .get('/api/personnel')
-        .query({ group_id: alpha.id })
-    ).body;
-    expect(people.total).toBe(8);
-    expect(people.items[0].access_group).toBe('Alpha');
+  it('requires session for groups/personnel reads', async () => {
+    expect(
+      (await request(harness.app.getHttpServer()).get('/api/groups')).status,
+    ).toBe(401);
+    expect(
+      (await request(harness.app.getHttpServer()).get('/api/personnel')).status,
+    ).toBe(401);
   });
 
-  it('ingest enriches group from personnel and auto-registers unknown as UNASSIGNED', async () => {
-    const known = await request(harness.app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 101,
-        seq: 1,
-        timestamp: '2026-10-05T12:00:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags: encodeFlags({}),
-      });
-    expect(known.status).toBe(200);
-    expect(known.body.group_id).toBe('Alpha');
+  it('does not seed groups — settings start empty until operations/admin create them', async () => {
+    const groups = (
+      await request(harness.app.getHttpServer()).get('/api/groups').set(headers)
+    ).body;
+    expect(groups.items).toEqual([]);
 
-    const unknown = await request(harness.app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 9999,
-        seq: 1,
-        timestamp: '2026-10-05T12:01:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 80,
-        hrv: 40,
-        spo2: 98,
-        temp: 36,
-        batt: 90,
-        flags: encodeFlags({}),
-        group_id: 'Alpha',
-      });
+    const people = (
+      await request(harness.app.getHttpServer()).get('/api/personnel').set(headers)
+    ).body;
+    expect(people.total).toBe(0);
+  });
+
+  it('ingest leaves group null until personnel/group is assigned (no invent)', async () => {
+    const known = await ingestBurst(harness.app, {
+      soldier_id: 101,
+      seq: 1,
+      timestamp: '2026-10-05T12:00:00Z',
+      flags: encodeFlags({}),
+    });
+    expect(known.status).toBe(200);
+    expect(firstRecord(known).group_id).toBeNull();
+
+    const unknown = await ingestBurst(harness.app, {
+      soldier_id: 9999,
+      seq: 1,
+      timestamp: '2026-10-05T12:01:00Z',
+      flags: encodeFlags({}),
+    });
     expect(unknown.status).toBe(200);
-    expect(unknown.body.group_id).toBeNull();
+    expect(firstRecord(unknown).group_id).toBeNull();
 
     const roster = (
       await request(harness.app.getHttpServer())
         .get('/api/personnel')
+        .set(headers)
         .query({ unassigned: '1' })
     ).body;
-    expect(roster.items.some((p: any) => p.soldier_id === 9999)).toBe(true);
-    expect(
-      roster.items.find((p: any) => p.soldier_id === 9999).access_group,
-    ).toBe('UNASSIGNED');
+    expect(roster.items.some((p: any) => p.soldier_id === 9999)).toBe(false);
   });
 
   it('assigning personnel to a group enriches subsequent ingest', async () => {
     const created = await request(harness.app.getHttpServer())
       .post('/api/groups')
+      .set(headers)
       .send({ name: 'Bravo', description: 'Second squad' });
     expect(created.status).toBe(201);
 
-    await request(harness.app.getHttpServer())
+    const assigned = await request(harness.app.getHttpServer())
       .put('/api/personnel/by-soldier/9998/group')
+      .set(headers)
       .send({ group_id: created.body.id });
+    expect(assigned.status).toBe(200);
 
-    const ingested = await request(harness.app.getHttpServer())
-      .post('/api/ingest/telemetry')
-      .send({
-        soldier_id: 9998,
-        seq: 2,
-        timestamp: '2026-10-05T12:02:00Z',
-        lat: -6.2,
-        lon: 106.8,
-        hr: 75,
-        hrv: 35,
-        spo2: 97,
-        temp: 36,
-        batt: 88,
-        flags: encodeFlags({}),
-      });
+    const ingested = await ingestBurst(harness.app, {
+      soldier_id: 9998,
+      seq: 2,
+      timestamp: '2026-10-05T12:02:00Z',
+      hr: 75,
+      hrv: 35,
+      spo2: 97,
+      batt: 88,
+      flags: encodeFlags({}),
+    });
     expect(ingested.status).toBe(200);
-    expect(ingested.body.group_id).toBe('Bravo');
+    expect(firstRecord(ingested).group_id).toBe('Bravo');
   });
 });
